@@ -2,9 +2,10 @@
 
 import { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Mic, Send, Sparkles, User, Volume2, VolumeX, PhoneCall, MicOff, AlertTriangle } from "lucide-react";
+import { Mic, Send, Sparkles, User, Volume2, VolumeX, PhoneCall, MicOff, AlertTriangle, ChevronDown, ChevronUp } from "lucide-react";
 import { useSpeech } from "@/lib/speech";
 import { t } from "@/lib/i18n";
+import { fieldPrompt } from "@/lib/dialogManager";
 import { cn } from "@/lib/utils";
 import type { LangCode, ChatMessage, SegmentCode } from "@/types";
 
@@ -37,8 +38,13 @@ export function ChatPanel({
   const [pendingConfirm, setPendingConfirm] = useState<PendingConfirm | null>(null);
   const [missCount, setMissCount] = useState(0);
   const [voiceOn, setVoiceOn] = useState(true);
+  const [collapsed, setCollapsed] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
   const greeted = useRef(false);
+  // Tracks the last field we've already asked about, so this effect (below)
+  // doesn't re-push the same prompt on every unrelated re-render — only
+  // when activeFieldKey actually changes to something new.
+  const lastPromptedFieldRef = useRef<string | null>(null);
 
   const { listening, supported, interimTranscript, error: micError, startListening, stopListening, speak } = useSpeech({
     lang,
@@ -58,6 +64,25 @@ export function ChatPanel({
     if (voiceOn) speak(greeting);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Explicitly asks about whatever field is now active, whenever that
+  // changes — covers both real gaps reported live: a page refresh wiped the
+  // chat back to just the greeting with nothing telling the borrower what
+  // to answer next (the small "Asking: X" header label was the only clue,
+  // easy to miss), and even mid-session the previous flow only ever said
+  // "Saved. Let's continue." after a field was filled — never actually
+  // asking the next question. Guarded by lastPromptedFieldRef so it only
+  // fires on a genuine change, not every re-render.
+  useEffect(() => {
+    if (!activeFieldKey) return;
+    if (lastPromptedFieldRef.current === activeFieldKey) return;
+    lastPromptedFieldRef.current = activeFieldKey;
+    const prompt = fieldPrompt(activeFieldKey, lang, segment ?? undefined);
+    if (!prompt) return;
+    pushMessage("assistant", prompt, "text");
+    if (voiceOn) speak(prompt);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeFieldKey]);
 
   useEffect(() => {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: "smooth" });
@@ -111,7 +136,7 @@ export function ChatPanel({
   }
 
   return (
-    <div className={cn("flex h-full flex-col overflow-hidden rounded-3xl border border-ink-100 bg-white shadow-lift dark:border-ink-800 dark:bg-ink-900", className)}>
+    <div className={cn("flex flex-col overflow-hidden rounded-3xl border border-ink-100 bg-white shadow-lift dark:border-ink-800 dark:bg-ink-900", collapsed ? "" : "h-full", className)}>
       {/* Header */}
       <div className="flex items-center justify-between border-b border-ink-100 bg-gradient-to-r from-ink-900 to-ink-800 px-4 py-3.5 dark:border-ink-800">
         <div className="flex items-center gap-2.5">
@@ -128,15 +153,31 @@ export function ChatPanel({
             </p>
           </div>
         </div>
-        <button
-          onClick={() => setVoiceOn((v) => !v)}
-          className="rounded-full p-2 text-ink-300 transition-colors hover:bg-white/10 hover:text-white"
-          aria-label="Toggle voice replies"
-        >
-          {voiceOn ? <Volume2 className="h-4 w-4" /> : <VolumeX className="h-4 w-4" />}
-        </button>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={() => setVoiceOn((v) => !v)}
+            className="rounded-full p-2 text-ink-300 transition-colors hover:bg-white/10 hover:text-white"
+            aria-label="Toggle voice replies"
+          >
+            {voiceOn ? <Volume2 className="h-4 w-4" /> : <VolumeX className="h-4 w-4" />}
+          </button>
+          {/* No way to shrink the chat panel out of the way while filling in
+              the form directly — reported live. A borrower/staff user who
+              wants to work from the visible form fields rather than the
+              chat had no option but to leave it taking up its full height
+              the whole time. */}
+          <button
+            onClick={() => setCollapsed((c) => !c)}
+            className="rounded-full p-2 text-ink-300 transition-colors hover:bg-white/10 hover:text-white"
+            aria-label={collapsed ? "Expand chat" : "Collapse chat"}
+          >
+            {collapsed ? <ChevronDown className="h-4 w-4" /> : <ChevronUp className="h-4 w-4" />}
+          </button>
+        </div>
       </div>
 
+      {collapsed ? null : (
+        <>
       {/* Messages */}
       <div ref={listRef} className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
         {messages.map((m) => (
@@ -228,6 +269,8 @@ export function ChatPanel({
           </button>
         </form>
       </div>
+        </>
+      )}
     </div>
   );
 }
