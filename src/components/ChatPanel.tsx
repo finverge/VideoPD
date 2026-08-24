@@ -117,24 +117,41 @@ export function ChatPanel({
   }, [applicationId]);
 
   // Explicitly asks about whatever field is now active, whenever that
-  // changes — covers both real gaps reported live: a page refresh wiped the
-  // chat back to just the greeting with nothing telling the borrower what
-  // to answer next (the small "Asking: X" header label was the only clue,
-  // easy to miss), and even mid-session the previous flow only ever said
-  // "Saved. Let's continue." after a field was filled — never actually
-  // asking the next question. Guarded by lastPromptedFieldRef so it only
-  // fires on a genuine change, not every re-render. Also gated on
-  // historyLoaded so it can't race the hydration effect above and push a
+  // settles on something new — covers both real gaps reported live: a page
+  // refresh wiped the chat back to just the greeting with nothing telling
+  // the borrower what to answer next (the small "Asking: X" header label
+  // was the only clue, easy to miss), and even mid-session the previous
+  // flow only ever said "Saved. Let's continue." after a field was filled —
+  // never actually asking the next question. Guarded by lastPromptedFieldRef
+  // so it only fires on a genuine change, not every re-render. Also gated
+  // on historyLoaded so it can't race the hydration effect above and push a
   // premature duplicate before we know what's already in the real history.
+  //
+  // Debounced (500ms): activeFieldKey is derived from the wizard's own
+  // `fields` state, which updates on every keystroke in the visible form
+  // (StepFields.tsx's onChange fires per character) — the moment a field
+  // becomes non-empty (its very first typed character), activeFieldKey
+  // immediately jumps to the NEXT empty field, while the borrower is still
+  // mid-typing the current one. Without debouncing, this effect fired
+  // instantly on that first keystroke and the chat started asking about the
+  // *next* field before the current one was even finished — reported live
+  // as the chat "losing context when answering a few fields manually and
+  // switching to the chatbot." Waiting for activeFieldKey to actually settle
+  // (no further change for 500ms) means it only fires once the borrower has
+  // genuinely moved on, not mid-keystroke.
   useEffect(() => {
     if (!historyLoaded) return;
     if (!activeFieldKey) return;
     if (lastPromptedFieldRef.current === activeFieldKey) return;
-    lastPromptedFieldRef.current = activeFieldKey;
-    const prompt = fieldPrompt(activeFieldKey, lang, segment ?? undefined);
-    if (!prompt) return;
-    pushMessage("assistant", prompt, "text");
-    if (voiceOn) speak(prompt);
+    const timer = setTimeout(() => {
+      if (lastPromptedFieldRef.current === activeFieldKey) return; // already prompted by a race, or overtaken by a newer field since this timer was set
+      lastPromptedFieldRef.current = activeFieldKey;
+      const prompt = fieldPrompt(activeFieldKey, lang, segment ?? undefined);
+      if (!prompt) return;
+      pushMessage("assistant", prompt, "text");
+      if (voiceOn) speak(prompt);
+    }, 500);
+    return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeFieldKey, historyLoaded]);
 
