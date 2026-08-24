@@ -257,7 +257,22 @@ function getGeo(): Promise<GeoResult> {
         if (err.code === err.TIMEOUT) return resolve({ reason: "location request timed out (GPS may be unavailable indoors)." });
         resolve({ reason: "location is unavailable on this device right now." });
       },
-      { timeout: 4000 }
+      {
+        // 4s was too tight for a real cold fix (reported live: worked on
+        // one upload, timed out on the next). 10s gives a genuine cold
+        // acquisition a realistic chance without hanging the upload
+        // indefinitely if there's truly no signal.
+        timeout: 10000,
+        // Reuse a position the browser already has from up to 5 minutes
+        // ago instead of forcing a brand-new fix every single upload — the
+        // default (maximumAge: 0) never reuses anything, so even the very
+        // next upload seconds later has to reacquire from scratch. Across a
+        // multi-document upload flow like this one, that's most of why
+        // "worked on the first upload, timed out on the second" happens:
+        // the first call's successful fix gets thrown away instead of
+        // reused for the next document a few seconds later.
+        maximumAge: 5 * 60 * 1000,
+      }
     );
   });
 }
