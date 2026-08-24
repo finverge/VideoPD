@@ -16,6 +16,27 @@ interface ChatRequestBody {
   awaitingConfirmDisplay?: string | null;
 }
 
+// Returns this application's persisted chat history — lets ChatPanel
+// rehydrate the actual conversation on mount instead of starting fresh
+// every time. Found live: the mobile chat sheet fully unmounts on close
+// (tapping the backdrop, the X button) and remounts from scratch on
+// reopen, silently discarding the entire conversation shown so far — a
+// borrower mid-way through answering questions would see the chat jump
+// straight back to the generic greeting, no memory of anything already
+// asked or answered, from something as ordinary as an accidental tap
+// outside the sheet. The desktop panel never hit this (stays mounted
+// continuously), which is why it wasn't caught earlier.
+export async function GET(req: NextRequest) {
+  const applicationId = req.nextUrl.searchParams.get("applicationId");
+  if (!applicationId) return NextResponse.json({ error: "applicationId is required." }, { status: 400 });
+  const turns = await db.chatTurn.findMany({
+    where: { applicationId },
+    orderBy: { createdAt: "asc" },
+    select: { id: true, role: true, channel: true, text: true, createdAt: true },
+  });
+  return NextResponse.json({ turns });
+}
+
 export async function POST(req: NextRequest) {
   const body = (await req.json()) as ChatRequestBody;
   const { applicationId, language, channel, userText } = body;

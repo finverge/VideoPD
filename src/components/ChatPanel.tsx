@@ -39,6 +39,7 @@ export function ChatPanel({
   const [missCount, setMissCount] = useState(0);
   const [voiceOn, setVoiceOn] = useState(true);
   const [collapsed, setCollapsed] = useState(false);
+  const [historyLoaded, setHistoryLoaded] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
   const greeted = useRef(false);
   // Tracks the last field we've already asked about, so this effect (below)
@@ -56,14 +57,64 @@ export function ChatPanel({
     },
   });
 
+  // Rehydrates the real conversation from the server (every turn is already
+  // persisted via api/chat's POST) instead of always starting fresh — found
+  // live: the mobile chat sheet fully unmounts on close (backdrop tap, the
+  // X button) and remounts from scratch on reopen, so a borrower mid-way
+  // through answering questions would see the chat silently jump back to
+  // the generic greeting with zero memory of anything already asked or
+  // answered, from something as ordinary as an accidental tap outside the
+  // sheet. The desktop panel never hit this (stays mounted continuously),
+  // which is why it wasn't caught earlier. Falls back to greeting fresh —
+  // the original behavior — when there's genuinely no history yet, or the
+  // fetch itself fails.
   useEffect(() => {
-    if (greeted.current) return;
-    greeted.current = true;
-    const greeting = t(lang, "chatGreeting", { lang: lang.toUpperCase() });
-    pushMessage("assistant", greeting, "text");
-    if (voiceOn) speak(greeting);
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/chat?applicationId=${applicationId}`);
+        const data = await res.json();
+        const turns = (data.turns ?? []) as { id: string; role: "user" | "assistant"; channel: string; text: string; createdAt: string }[];
+        if (cancelled) return;
+        greeted.current = true;
+        if (turns.length > 0) {
+          setMessages(
+            turns.map((turn) => ({
+              id: turn.id,
+              role: turn.role,
+              text: turn.text,
+              channel: turn.channel === "voice" ? "voice" : "text",
+              createdAt: turn.createdAt,
+            }))
+          );
+          // If the current field's prompt is already the last thing shown
+          // (the ordinary case — reopening right where you left off), don't
+          // let the effect below push a duplicate of it.
+          const lastAssistantText = [...turns].reverse().find((turn) => turn.role === "assistant")?.text;
+          if (activeFieldKey) {
+            const prompt = fieldPrompt(activeFieldKey, lang, segment ?? undefined);
+            if (prompt && prompt === lastAssistantText) lastPromptedFieldRef.current = activeFieldKey;
+          }
+        } else {
+          const greeting = t(lang, "chatGreeting", { lang: lang.toUpperCase() });
+          pushMessage("assistant", greeting, "text");
+          if (voiceOn) speak(greeting);
+        }
+      } catch {
+        if (!cancelled && !greeted.current) {
+          greeted.current = true;
+          const greeting = t(lang, "chatGreeting", { lang: lang.toUpperCase() });
+          pushMessage("assistant", greeting, "text");
+        }
+      } finally {
+        if (!cancelled) setHistoryLoaded(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [applicationId]);
 
   // Explicitly asks about whatever field is now active, whenever that
   // changes — covers both real gaps reported live: a page refresh wiped the
@@ -72,8 +123,11 @@ export function ChatPanel({
   // easy to miss), and even mid-session the previous flow only ever said
   // "Saved. Let's continue." after a field was filled — never actually
   // asking the next question. Guarded by lastPromptedFieldRef so it only
-  // fires on a genuine change, not every re-render.
+  // fires on a genuine change, not every re-render. Also gated on
+  // historyLoaded so it can't race the hydration effect above and push a
+  // premature duplicate before we know what's already in the real history.
   useEffect(() => {
+    if (!historyLoaded) return;
     if (!activeFieldKey) return;
     if (lastPromptedFieldRef.current === activeFieldKey) return;
     lastPromptedFieldRef.current = activeFieldKey;
@@ -82,7 +136,7 @@ export function ChatPanel({
     pushMessage("assistant", prompt, "text");
     if (voiceOn) speak(prompt);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeFieldKey]);
+  }, [activeFieldKey, historyLoaded]);
 
   useEffect(() => {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: "smooth" });
