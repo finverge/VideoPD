@@ -33,6 +33,8 @@ import { Textarea } from "@/components/ui/Input";
 import { getStoredStaff, clearStoredStaff, type StaffMember } from "@/lib/staffAuth";
 import { formatINR } from "@/lib/utils";
 import { SEGMENT_FIELDS } from "@/lib/formSchema";
+import { draftUnderwriterRecommendation } from "@/lib/underwriterAgent";
+import { Sparkles } from "lucide-react";
 import { t } from "@/lib/i18n";
 import type { InitialSummary, SegmentCode } from "@/types";
 
@@ -451,6 +453,34 @@ export default function CaseDetailPage() {
   );
 }
 
+// Assembles the real, already-computed signals this case has into the
+// shape draftUnderwriterRecommendation needs — no new checks run here, just
+// gathering what's already on the page. Reads bank statement/identity data
+// from the live rows (session.bankStatements, application.evidence), not
+// the frozen dossier snapshot, since those can have moved on since the
+// dossier was compiled (e.g. an authenticity re-check after a re-upload).
+function buildDraftInput(data: CaseDetailData) {
+  const summary: InitialSummary | null = data.summary ? JSON.parse(data.summary.summaryJson) : null;
+  const session = data.videoPdSession;
+  const dossier: Dossier | null = session?.dossierJson ? JSON.parse(session.dossierJson) : null;
+  const statement = session?.bankStatements[0] ?? null;
+  const liveness = data.application.evidence.find((e) => e.type === "VIDEOPD_LIVENESS");
+
+  return {
+    riskSeverity: data.riskSeverity,
+    riskFlags: summary?.riskFlags ?? [],
+    skillIntentScore: session?.skillIntentScore ?? null,
+    videoPdComplete: session?.status === "COMPLETE",
+    dossierFlags: dossier?.flags ?? [],
+    bankStatement: statement
+      ? { eligibilityFlag: statement.eligibilityFlag, authenticityStatus: statement.authenticityStatus, authenticityReasons: statement.authenticityReasonsJson ? JSON.parse(statement.authenticityReasonsJson) : [] }
+      : null,
+    identityVerification: liveness
+      ? { authenticityStatus: liveness.authenticityStatus, notes: liveness.authenticityNotes, faceMatchResult: liveness.faceMatchResult }
+      : null,
+  };
+}
+
 function ActionPanel({
   data, staff, busy, onClaim, onUnderwriterDecision, onApproverDecision,
 }: {
@@ -462,6 +492,20 @@ function ActionPanel({
   onApproverDecision: (decision: "APPROVED" | "REJECTED" | "SENT_BACK", notes: string) => void;
 }) {
   const [notes, setNotes] = useState("");
+  // Purely a UI hint (which button to highlight) — never disables or
+  // pre-selects anything. The underwriter can click either button
+  // regardless of what this says, and can freely edit the notes text
+  // before submitting either way.
+  const [draftSuggestion, setDraftSuggestion] = useState<"APPROVE" | "REJECT" | null>(null);
+
+  function draftRecommendation() {
+    const { recommendation, reasoning } = draftUnderwriterRecommendation(buildDraftInput(data));
+    setDraftSuggestion(recommendation);
+    // Marker stays in the persisted notes permanently — a real audit trail
+    // of what originated as a draft vs. what the underwriter wrote
+    // themselves, even after they edit or override it.
+    setNotes(`[AI-drafted — reviewed before submission]\n${reasoning}`);
+  }
 
   if (data.status === "APPROVED" || data.status === "REJECTED") {
     return <p className="text-sm text-ink-500 dark:text-ink-400">This case is closed — see the decision trail above.</p>;
@@ -499,6 +543,28 @@ function ActionPanel({
     }
     return (
       <div className="space-y-3">
+        <div className="flex items-center justify-between gap-2">
+          <button
+            type="button"
+            onClick={() => draftRecommendation()}
+            className="flex items-center gap-1.5 rounded-full border border-ink-200 px-3 py-1.5 text-xs font-semibold text-ink-600 transition-colors hover:border-sprout-300 hover:text-sprout-700 dark:border-ink-700 dark:text-ink-300 dark:hover:border-sprout-700 dark:hover:text-sprout-400"
+          >
+            <Sparkles className="h-3.5 w-3.5" /> Draft recommendation
+          </button>
+          {draftSuggestion && (
+            <span className={`text-[11px] font-semibold ${draftSuggestion === "APPROVE" ? "text-sprout-600 dark:text-sprout-400" : "text-red-500"}`}>
+              Suggested: {draftSuggestion}
+            </span>
+          )}
+        </div>
+        {/* Rule-based synthesis of the signals already on this page — not a
+            language model, and never submitted automatically. It only ever
+            pre-fills the notes below, which stay fully editable; the
+            underwriter still has to read this and explicitly click one of
+            the two buttons themselves. Nothing here writes to the database. */}
+        <p className="text-[11px] leading-snug text-ink-400">
+          "Draft recommendation" synthesizes the checks already shown on this page (risk flags, bank statement, identity verification) into a starting point — it never decides or submits anything. Review and edit before confirming.
+        </p>
         <Textarea label="Notes (optional)" value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Anything the approver should know…" />
         <div className="flex gap-2">
           <Button onClick={() => onUnderwriterDecision("APPROVE", notes)} loading={busy} icon={<CheckCircle2 className="h-4 w-4" />}>Recommend approve</Button>

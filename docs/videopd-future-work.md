@@ -315,6 +315,41 @@ resumes at the exact step they left off rather than restarting from the
 welcome screen. `VideoPdSession.currentStep` is written on every step
 transition and read back on load.
 
+## 10b. Draft underwriter recommendation (requested live as "replace the underwriter with an AI agent") — built as decision support, autonomous decisioning explicitly refused
+
+Requested live, verbatim, as full autonomous approve/reject with reduced
+human intervention. **Refused as asked** — this is exactly the "Automated,
+non-underwriter-reviewed credit decisioning" the Permanent scope boundaries
+section below excludes, and that exclusion reflects a real regulatory
+reality for lending (human accountability/explainability for adverse
+credit decisions), not just an arbitrary scoping choice.
+
+**What was built instead** (`src/lib/underwriterAgent.ts`): a
+"Draft recommendation" button that synthesizes the real signals already on
+the case page (risk flags, bank statement eligibility/authenticity, identity
+verification, skill/intent score) into a suggested APPROVE/REJECT with
+written reasoning citing the specific real signals — purely to pre-fill the
+underwriter's own notes field. Deterministic rule synthesis, explicitly
+labeled as such in its own output text ("not a language model") — this app
+has no real free/keyless LLM API to honestly call, so rather than fake an
+"AI-generated" writeup, it states plainly what it actually is, same footing
+as every other advisory check here.
+
+Real control checks, verified live: the drafting function is pure (no `db`
+import, no `fetch` call — confirmed by reading its own source) and only
+ever calls `setNotes`/`setDraftSuggestion` client-side; nothing writes to
+the database until the underwriter explicitly clicks Recommend Approve/
+Reject themselves, same two buttons as before, both always independently
+clickable regardless of what the draft suggests. Verified against a real
+seeded case with a genuine high-severity flag (tampered bank statement):
+clicking the button filled the notes with a correct REJECT draft citing the
+real reasons, the "Suggested: REJECT" badge appeared, and the database
+confirmed `underwriterRecommendation` stayed `null` and the case stayed
+`UNDER_REVIEW` — nothing was submitted by the draft itself. The notes are
+permanently prefixed `[AI-drafted — reviewed before submission]` if used,
+so the audit trail always shows what originated as a draft vs. what the
+underwriter wrote themselves.
+
 ## Permanent scope boundaries (not "future work" — explicitly excluded)
 
 These aren't gaps to close later; they're BRD Section 7.2 exclusions that
