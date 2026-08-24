@@ -89,7 +89,16 @@ export default function VideoPdSessionPage() {
   }
 
   return (
-    <main className="mx-auto flex min-h-screen max-w-lg flex-col px-5 py-8">
+    // max-w-lg fits the rest of this page's narrow, single-column wizard
+    // content (forms, camera dialogs) — but LiveCallRoom's own video grid
+    // (grid-cols-2 sm:grid-cols-3, same component the underwriter's much
+    // wider max-w-5xl case page uses) was capped to that same ~512px width
+    // whenever the borrower opened the live call, rendering the video tiles
+    // visibly small with plenty of real, unused screen width beyond it —
+    // reported live, confirmed by the underwriter's side of the identical
+    // component looking correct at a wider max-w-5xl. Widens only while the
+    // live call is actually open; every other step keeps the narrower width.
+    <main className={`mx-auto flex min-h-screen flex-col px-5 py-8 transition-[max-width] ${showLiveCall ? "max-w-3xl" : "max-w-lg"}`}>
       {/* Borrower's other portal pages (landing, apply wizard) both offer a
           manual theme toggle — this page was the one gap. Logo stays
           centered like before; toggle sits in the corner via an invisible
