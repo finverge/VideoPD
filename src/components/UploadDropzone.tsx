@@ -30,6 +30,7 @@ export function UploadDropzone({
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
+  const [geoNote, setGeoNote] = useState<string | null>(null);
   const [cameraOpen, setCameraOpen] = useState(false);
   const [hasCamera, setHasCamera] = useState(false);
 
@@ -44,15 +45,26 @@ export function UploadDropzone({
   async function upload(file: File) {
     setUploading(true);
     setLocalError(null);
+    setGeoNote(null);
     try {
       const geo = await getGeo();
       const form = new FormData();
       form.append("file", file);
       form.append("applicationId", applicationId);
       form.append("type", type);
-      if (geo) {
+      if ("lat" in geo) {
         form.append("geoLat", String(geo.lat));
         form.append("geoLng", String(geo.lng));
+      } else {
+        // Every prior reason (permission denied, unsupported, timed out, an
+        // insecure http:// origin blocking the API outright) used to
+        // collapse into the exact same silent "no location" with nothing
+        // shown anywhere — reported live as "why didn't it capture it?"
+        // with no way to tell which of those actually happened. Not
+        // treated as an upload error (setLocalError) since the upload
+        // itself still succeeds — this is purely informational, so it
+        // doesn't block or fail anything.
+        setGeoNote(geo.reason);
       }
       const res = await fetch("/api/upload", { method: "POST", body: form });
       const data = await res.json();
@@ -161,6 +173,19 @@ export function UploadDropzone({
             {localError}
           </motion.p>
         )}
+        {/* Informational, not an error — the upload above still succeeded.
+            Only tells you WHY no location tag was attached, since every
+            reason used to be silently indistinguishable from every other. */}
+        {!localError && geoNote && (
+          <motion.p
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: "auto" }}
+            exit={{ opacity: 0, height: 0 }}
+            className="mt-1.5 text-xs font-medium text-ink-400"
+          >
+            No location tag attached: {geoNote}
+          </motion.p>
+        )}
       </AnimatePresence>
 
       <AnimatePresence>
@@ -209,12 +234,29 @@ function IconAction({
   );
 }
 
-function getGeo(): Promise<{ lat: number; lng: number } | null> {
+type GeoResult = { lat: number; lng: number } | { reason: string };
+
+// Every failure path here used to collapse to the same silent `resolve(null)`
+// — permission denied, no browser support, a GPS timeout, and one common
+// real-world gotcha (navigator.geolocation is simply undefined on any
+// non-secure, non-localhost origin — plain http:// on a LAN IP, no prompt,
+// no error, nothing) were all indistinguishable from each other and
+// invisible to whoever was testing. Reported live as "why didn't it capture
+// it?" with no way to tell which one actually happened.
+function getGeo(): Promise<GeoResult> {
   return new Promise((resolve) => {
-    if (typeof navigator === "undefined" || !navigator.geolocation) return resolve(null);
+    if (typeof navigator === "undefined") return resolve({ reason: "not running in a browser." });
+    if (typeof window !== "undefined" && !window.isSecureContext) {
+      return resolve({ reason: "this page isn't loaded over https:// or localhost — browsers only allow location access on a secure connection." });
+    }
+    if (!navigator.geolocation) return resolve({ reason: "this browser doesn't support location access." });
     navigator.geolocation.getCurrentPosition(
       (pos) => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
-      () => resolve(null),
+      (err) => {
+        if (err.code === err.PERMISSION_DENIED) return resolve({ reason: "location access was denied." });
+        if (err.code === err.TIMEOUT) return resolve({ reason: "location request timed out (GPS may be unavailable indoors)." });
+        resolve({ reason: "location is unavailable on this device right now." });
+      },
       { timeout: 4000 }
     );
   });
