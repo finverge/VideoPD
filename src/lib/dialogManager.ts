@@ -18,7 +18,11 @@ export interface ExtractionResult {
 }
 
 const YES_WORDS = [
-  "yes", "yeah", "yep", "correct", "right", "haan", "ok", "okay", "sure",
+  // "save"/"confirm"/"done" added — real replies people actually send
+  // ("Save it.", "confirm", "done") that were never recognized because they
+  // don't contain any literal yes/yeah/ok/etc. word at all, a different gap
+  // from the word-boundary issue below.
+  "yes", "yeah", "yep", "correct", "right", "haan", "ok", "okay", "sure", "save", "confirm", "confirmed", "done",
   "हाँ", "हां", "ठीक", // hi
   "అవును", "సరే", // te
   "ஆம்", "சரி", // ta
@@ -26,7 +30,7 @@ const YES_WORDS = [
   "അതെ", "ശരി", // ml
 ];
 const NO_WORDS = [
-  "no", "nope", "wrong", "nahi", "incorrect", "redo",
+  "no", "nope", "wrong", "nahi", "incorrect", "redo", "cancel",
   "नहीं", "गलत", // hi
   "కాదు", "తప్పు", // te
   "இல்லை", "தவறு", // ta
@@ -34,30 +38,44 @@ const NO_WORDS = [
   "അല്ല", "തെറ്റ്", // ml
 ];
 
-// Word-boundary prefix match: true if `lower` IS `w`, or starts with `w`
-// followed by anything that isn't itself a letter/digit — a space, comma,
-// period, exclamation mark, etc. `startsWith(w + " ")` alone (the previous
-// check) missed the extremely common case of a leading word followed by
-// punctuation instead of a space, e.g. "No, let me type my name." or
-// "Yes, that's right." — real replies people actually type/say, not edge
-// cases. Also guards against a real false-positive risk in the other
-// direction, e.g. "nope" starting with "no": the character after "no" here
-// is "p", which IS alphanumeric, so it correctly does not match "no" (it
-// still matches via its own "nope" entry).
-function startsWithWord(lower: string, words: string[]): boolean {
-  return words.some((w) => {
-    if (lower === w) return true;
-    if (!lower.startsWith(w)) return false;
-    const next = lower[w.length];
-    return next !== undefined && !/[a-z0-9]/i.test(next);
-  });
+// Splits into whole "words" for any script, not just Latin — the previous
+// approach here (and separately, extractFieldValue's choice matcher below)
+// used JS regex \b word-boundaries, which turn out to flatly not work on
+// Devanagari/Telugu/Tamil/Kannada/Malayalam text at all: \b is defined
+// relative to \w (Latin letters/digits/underscore only), so a script where
+// *no* character is \w has no \b boundary anywhere in it — confirmed live,
+// /\bहाँ\b/i.test("मुझे हाँ चाहिए") is false. That's not a partial-match
+// gap, it's total: every non-English YES_WORDS/NO_WORDS entry, and every
+// non-English choice label match in extractFieldValue, was silently
+// unmatchable regardless of position. Splitting on "anything that isn't a
+// Unicode letter or number" (\p{L}/\p{N} with the u flag) sidesteps \w
+// entirely and works for any of the six launch languages, all of which are
+// space-separated scripts.
+function tokenize(text: string): string[] {
+  return text.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+}
+
+// True if `phrase`'s own tokens appear as a contiguous run inside `tokens`
+// — handles both single-word candidates ("save", "yes") and multi-word ones
+// ("voter id") the same way, anywhere in the text, not just as a prefix.
+// Anywhere-matching (not just "starts with") is what "Save it." and "That
+// yes." both need — the previous prefix-only check missed both.
+function containsPhrase(tokens: string[], phrase: string): boolean {
+  const phraseTokens = tokenize(phrase);
+  if (phraseTokens.length === 0) return false;
+  for (let i = 0; i <= tokens.length - phraseTokens.length; i++) {
+    if (phraseTokens.every((t, j) => tokens[i + j] === t)) return true;
+  }
+  return false;
 }
 
 export function isAffirmative(text: string): boolean {
-  return startsWithWord(text.toLowerCase().trim(), YES_WORDS);
+  const tokens = tokenize(text);
+  return YES_WORDS.some((w) => containsPhrase(tokens, w));
 }
 export function isNegative(text: string): boolean {
-  return startsWithWord(text.toLowerCase().trim(), NO_WORDS);
+  const tokens = tokenize(text);
+  return NO_WORDS.some((w) => containsPhrase(tokens, w));
 }
 
 // Indic digit blocks → Latin 0-9, so "౫౦౦౦౦" / "५०,०००" parse the same as "50000".
@@ -175,13 +193,16 @@ export function extractFieldValue(
   }
 
   if (field?.type === "choice" && field.choices) {
-    const lower = text.toLowerCase();
-    // Word-boundary match, not plain .includes() — a choice whose value is a
-    // substring of another (e.g. "male" inside "female") would otherwise
-    // always match the shorter one first, regardless of which the borrower
-    // actually said. \b won't fire between "fe" and "male" in "female" since
-    // there's no boundary there, but it does fire for a standalone "male".
-    const matches = (candidate: string) => candidate && new RegExp(`\\b${escapeRegExp(candidate)}\\b`, "i").test(lower);
+    // Whole-word match via tokenize/containsPhrase (see their doc comments
+    // above), not plain .includes() — a choice whose value is a substring of
+    // another (e.g. "male" inside "female") would otherwise always match the
+    // shorter one first. The previous \b-regex version of this exact check
+    // silently never matched ANY non-English label — confirmed the same
+    // Unicode \b gap here as isAffirmative/isNegative had, affecting every
+    // localized gender/marital-status/ownership/ID-type/product-type choice
+    // in Hindi/Telugu/Tamil/Kannada/Malayalam.
+    const textTokens = tokenize(text);
+    const matches = (candidate: string) => Boolean(candidate) && containsPhrase(textTokens, candidate);
     const found = field.choices.find((c) => {
       const localizedLabel = t(lang, c.labelKey).toLowerCase();
       return (
