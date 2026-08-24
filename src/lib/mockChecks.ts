@@ -120,12 +120,24 @@ export function checkIncomeConsistency(declaredMonthlyIncome: number, statedMont
  * authenticity models. Here we do lightweight, honest heuristics so the
  * prototype's "flagged" path is actually reachable, not just decorative.
  */
-export function mockQualityCheck(fileSizeBytes: number, mimeType: string) {
+// ID/address proof are routinely a PDF (a DigiLocker or scanned-Aadhaar
+// download, not a photo) — the upload picker for these two types already
+// advertises "image/*,.pdf" (src/app/apply/[id]/page.tsx's EVIDENCE_CONFIG),
+// but this check had no PDF exception at all, so a PDF the client happily
+// accepted still got flagged "Unsupported file type." server-side, every
+// time (reported live). Every other evidence type is a live camera capture
+// (selfie, liveness, business photo/video) where a PDF genuinely wouldn't
+// make sense, so the exception is scoped to just these two, not blanket.
+const DOCUMENT_EVIDENCE_TYPES = new Set(["ID_PROOF", "ADDRESS_PROOF"]);
+
+export function mockQualityCheck(fileSizeBytes: number, mimeType: string, evidenceType?: string) {
   const MIN_BYTES = 15_000; // suspiciously small file → likely blank/corrupt
   if (fileSizeBytes < MIN_BYTES) {
     return { status: "FLAGGED" as const, notes: "File is unusually small — please re-capture with better lighting/focus." };
   }
-  if (!mimeType.startsWith("image/") && !mimeType.startsWith("video/")) {
+  const isImageOrVideo = mimeType.startsWith("image/") || mimeType.startsWith("video/");
+  const isAcceptedPdf = mimeType === "application/pdf" && (!evidenceType || DOCUMENT_EVIDENCE_TYPES.has(evidenceType));
+  if (!isImageOrVideo && !isAcceptedPdf) {
     return { status: "FLAGGED" as const, notes: "Unsupported file type." };
   }
   return { status: "PASSED" as const, notes: null };

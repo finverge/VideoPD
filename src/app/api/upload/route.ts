@@ -39,7 +39,7 @@ export async function POST(req: NextRequest) {
   const filePath = path.join(dir, safeName);
   await writeFile(filePath, bytes);
 
-  const quality = mockQualityCheck(bytes.length, file.type || "application/octet-stream");
+  const quality = mockQualityCheck(bytes.length, file.type || "application/octet-stream", type);
 
   const evidence = await db.uploadedEvidence.create({
     data: {
