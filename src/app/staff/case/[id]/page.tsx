@@ -81,6 +81,8 @@ interface BankStatementRow {
   eligibilityFlag: string | null;
   eligibilityReasonsJson: string | null;
   metricsJson: string | null;
+  authenticityStatus: string;
+  authenticityReasonsJson: string | null;
 }
 
 interface CallTranscriptSegmentRow {
@@ -898,6 +900,8 @@ function BankStatementCard({ statements }: { statements: BankStatementRow[] }) {
                 </ul>
               )}
 
+              <AuthenticityBanner status={s.authenticityStatus} reasonsJson={s.authenticityReasonsJson} />
+
               {metrics ? (
                 <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
                   <Stat label="Avg balance" value={formatINR(metrics.avgBalance)} />
@@ -917,6 +921,47 @@ function BankStatementCard({ statements }: { statements: BankStatementRow[] }) {
         })}
       </div>
     </Card>
+  );
+}
+
+/** Document-authenticity result — real, deterministic checks (PDF revision
+ * count/generating-software metadata, independent balance-vs-transaction
+ * arithmetic reconciliation; see src/lib/bankStatement.ts's checkPdfMetadata
+ * and checkTransactionIntegrity). Deliberately loud and explicit on a clean
+ * result, not just silence — an underwriter should see a positive
+ * confirmation that the document was actually checked and passed, not have
+ * to infer "no news is good news" from an absence of warnings. NOT a claim
+ * of detecting a doctored logo/visual alteration — that needs real image-
+ * forensics ML, out of scope here (see checkPdfMetadata's own doc comment). */
+function AuthenticityBanner({ status, reasonsJson }: { status: string; reasonsJson: string | null }) {
+  const reasons: string[] = reasonsJson ? JSON.parse(reasonsJson) : [];
+  if (status === "PENDING") return null; // extraction hasn't produced a verdict yet — nothing to show
+
+  const flagged = status === "FLAGGED";
+  return (
+    <div
+      className={`mb-2 flex items-start gap-2 rounded-xl border p-2.5 ${
+        flagged
+          ? "border-amber-200 bg-amber-50 dark:border-amber-900/50 dark:bg-amber-950/20"
+          : "border-sprout-200 bg-sprout-50 dark:border-sprout-900/50 dark:bg-sprout-950/20"
+      }`}
+    >
+      {flagged ? (
+        <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />
+      ) : (
+        <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-sprout-600 dark:text-sprout-400" />
+      )}
+      <div>
+        <p className={`text-xs font-semibold ${flagged ? "text-amber-700 dark:text-amber-400" : "text-sprout-700 dark:text-sprout-400"}`}>
+          {flagged ? "Document authenticity — review required" : "Document authenticity verified"}
+        </p>
+        {reasons.map((r, i) => (
+          <p key={i} className={`mt-0.5 text-[11px] leading-snug ${flagged ? "text-amber-600/90 dark:text-amber-500/80" : "text-sprout-600/90 dark:text-sprout-500/80"}`}>
+            {r}
+          </p>
+        ))}
+      </div>
+    </div>
   );
 }
 

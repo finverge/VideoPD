@@ -359,6 +359,18 @@ export function identityVerificationRiskFlag(notes: string): RiskFlag {
   return { code: IDENTITY_RISK_FLAG_CODE, label: "Identity verification flagged", severity: "medium", detail: notes };
 }
 
+// Same pattern as IDENTITY_RISK_FLAG_CODE above — stable code so a later
+// clean upload replaces rather than duplicates this flag.
+export const BANK_STATEMENT_AUTHENTICITY_RISK_FLAG_CODE = "BANK_STATEMENT_AUTHENTICITY";
+
+/** Wraps a checkPdfMetadata/checkTransactionIntegrity FLAGGED verdict as a
+ * RiskFlag, so a possibly-tampered bank statement surfaces on the
+ * underwriter queue itself, not only a case already opened to the bank
+ * statement panel. */
+export function bankStatementAuthenticityRiskFlag(reasons: string[]): RiskFlag {
+  return { code: BANK_STATEMENT_AUTHENTICITY_RISK_FLAG_CODE, label: "Bank statement authenticity flagged", severity: "high", detail: reasons.join(" ") };
+}
+
 export function riskSeverityOf(flags: RiskFlag[]): "none" | "low" | "medium" | "high" {
   if (flags.some((f) => f.severity === "high")) return "high";
   if (flags.some((f) => f.severity === "medium")) return "medium";

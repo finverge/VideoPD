@@ -49,10 +49,17 @@ const EMI_PATTERN = /\b(emi|loan repay|installment|instalment)\b/i;
 const AMOUNT_PATTERN = /\d[\d,]*\.\d{2}/g;
 const DATE_PATTERN = /^(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/;
 
+export interface PdfInfo {
+  Producer?: string;
+  Creator?: string;
+  CreationDate?: string;
+  ModDate?: string;
+}
+
 export async function extractText(
   absoluteFilePath: string,
   mimeType: string
-): Promise<{ text: string; status: "EXTRACTED" | "NEEDS_REVIEW" | "FAILED" }> {
+): Promise<{ text: string; status: "EXTRACTED" | "NEEDS_REVIEW" | "FAILED"; pdfInfo: PdfInfo | null; revisionCount: number | null }> {
   try {
     if (mimeType === "application/pdf") {
       // Runs as a separate `node` child process — see scripts/extract-pdf.js
@@ -64,29 +71,31 @@ export async function extractText(
       // work reliably in.
       const scriptPath = path.join(process.cwd(), "scripts", "extract-pdf.js");
       const { stdout } = await execFileAsync("node", [scriptPath, absoluteFilePath], { maxBuffer: 20 * 1024 * 1024 });
-      const result = JSON.parse(stdout) as { text: string };
+      const result = JSON.parse(stdout) as { text: string; info: PdfInfo | null; revisionCount: number };
       const text = result.text.trim();
       if (text.length < 40) {
         // No usable text layer — likely a scanned/image-only PDF. This
         // prototype doesn't rasterize PDF pages for an OCR fallback (see
         // module docstring) — flag rather than silently return near-nothing.
-        return { text, status: "NEEDS_REVIEW" };
+        return { text, status: "NEEDS_REVIEW", pdfInfo: result.info, revisionCount: result.revisionCount };
       }
-      return { text, status: "EXTRACTED" };
+      return { text, status: "EXTRACTED", pdfInfo: result.info, revisionCount: result.revisionCount };
     }
 
     if (mimeType.startsWith("image/")) {
       const Tesseract = await import("tesseract.js");
       const { data } = await Tesseract.recognize(absoluteFilePath, "eng");
       const text = data.text.trim();
-      if (text.length < 40) return { text, status: "NEEDS_REVIEW" };
-      return { text, status: "EXTRACTED" };
+      // No PDF structure on a raw image — the metadata/revision checks
+      // below simply don't apply here, not "checked and clean".
+      if (text.length < 40) return { text, status: "NEEDS_REVIEW", pdfInfo: null, revisionCount: null };
+      return { text, status: "EXTRACTED", pdfInfo: null, revisionCount: null };
     }
 
-    return { text: "", status: "FAILED" };
+    return { text: "", status: "FAILED", pdfInfo: null, revisionCount: null };
   } catch (e) {
     console.error("[bankStatement.extractText] extraction failed:", e);
-    return { text: "", status: "FAILED" };
+    return { text: "", status: "FAILED", pdfInfo: null, revisionCount: null };
   }
 }
 
@@ -157,6 +166,134 @@ export function parseTransactions(rawText: string): StatementTransaction[] {
   }
 
   return rows;
+}
+
+export interface AuthenticityCheckResult {
+  status: "PASSED" | "FLAGGED" | "NOT_APPLICABLE";
+  reasons: string[];
+}
+
+// Tools that generate/produce a bank statement are core-banking or reporting
+// systems (Crystal Reports, iText, internal PDF libraries) — an image/design
+// editor appearing as the Producer or Creator on a "bank statement" is a real
+// red flag, not a guess: banks don't generate statements in Photoshop.
+const SUSPICIOUS_PDF_TOOLS = /photoshop|illustrator|gimp|paint\.net|canva|indesign|affinity/i;
+
+// A PDF's own CreationDate/ModDate differing by more than this is treated as
+// "genuinely edited after generation", not just a multi-step generation
+// process finishing a few seconds apart. A heuristic threshold, not a
+// calibrated forensic standard — stated as such wherever this fires.
+const MOD_DATE_GRACE_MS = 5 * 60 * 1000;
+
+// PDF date strings look like "D:20230615120000+05'30'" or a bare
+// "20230615120000" — parses the fixed year/month/day/hour/minute/second
+// prefix all PDF generators use, ignoring the trailing timezone offset
+// (only relative gap between two such dates matters here, and both come
+// from the same document).
+function parsePdfInfoDate(raw: string | undefined): Date | null {
+  if (!raw) return null;
+  const m = raw.match(/D?:?(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/);
+  if (!m) return null;
+  const [, y, mo, d, h, mi, s] = m;
+  const date = new Date(Date.UTC(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi), Number(s)));
+  return isNaN(date.getTime()) ? null : date;
+}
+
+/**
+ * Real, deterministic PDF structural/metadata tamper signals — not a
+ * forensic-ML claim, just inspecting what's actually in the file:
+ *
+ * 1. Revision count: a legitimately single-pass-generated PDF has exactly
+ *    one "%%EOF" marker; a PDF later opened and re-saved by an editor gets a
+ *    new revision appended with its own "%%EOF" (a real, standard PDF
+ *    structural fact, not invented for this — see extract-pdf.js's
+ *    countRevisions). More than one means the file was saved again after
+ *    its original creation.
+ * 2. Producer/Creator naming an image/design editor rather than a document
+ *    generator — a bank statement produced in Photoshop is itself the tell.
+ * 3. ModDate meaningfully after CreationDate — the file's own internal
+ *    timestamps saying it was edited after being generated.
+ *
+ * NOT attempted, and explicitly out of scope: detecting a doctored logo or
+ * altered visual content within the page image itself. That needs real
+ * image-forensics ML (error-level analysis, copy-move forgery detection) —
+ * the same "genuinely hard ML problem, no credible path without a trained
+ * model or vendor" category as deepfake/lip-sync detection elsewhere in this
+ * app (see docs/videopd-future-work.md) — not attempted rather than faked.
+ */
+export function checkPdfMetadata(info: PdfInfo | null, revisionCount: number | null): AuthenticityCheckResult {
+  if (revisionCount === null) {
+    return { status: "NOT_APPLICABLE", reasons: ["Statement was submitted as an image, not a PDF — no PDF structure to check."] };
+  }
+
+  const reasons: string[] = [];
+
+  if (revisionCount > 1) {
+    reasons.push(
+      `This PDF has been saved ${revisionCount} times (${revisionCount} revision markers found in the file) — a bank-generated statement is normally produced once and never re-saved. Worth confirming this is the original file from the bank.`
+    );
+  }
+
+  const producer = info?.Producer ?? "";
+  const creator = info?.Creator ?? "";
+  if (SUSPICIOUS_PDF_TOOLS.test(producer) || SUSPICIOUS_PDF_TOOLS.test(creator)) {
+    reasons.push(`This PDF's own metadata names "${producer || creator}" as the tool that produced or last touched it — an image/design editor, not a banking or reporting system.`);
+  }
+
+  const created = parsePdfInfoDate(info?.CreationDate);
+  const modified = parsePdfInfoDate(info?.ModDate);
+  if (created && modified && modified.getTime() - created.getTime() > MOD_DATE_GRACE_MS) {
+    reasons.push(
+      `This PDF's internal "last modified" timestamp is after its "created" timestamp by more than a few minutes — its own metadata says it was edited after being generated.`
+    );
+  }
+
+  return { status: reasons.length > 0 ? "FLAGGED" : "PASSED", reasons };
+}
+
+// ₹1 tolerance for rounding/extraction noise, not a wide berth.
+const BALANCE_RECONCILIATION_TOLERANCE = 1;
+
+/**
+ * Real, non-circular arithmetic tamper signal: each row's transaction
+ * amount and its running balance are extracted independently from the same
+ * line (see parseTransactions — the balance-delta comparison only decides
+ * debit-vs-credit's SIGN; the amount's own VALUE comes from a separate
+ * capture group on the same line, so nothing forces them to already agree).
+ * Verifying the balance actually moved by the stated transaction amount is
+ * the classic tell of a doctored statement — a number edited on one line
+ * without correcting the running balance underneath. Real math against
+ * really-independently-extracted numbers, same footing as every other
+ * check in this codebase — an arithmetic fact, not a forensic claim.
+ *
+ * Honest caveat, stated in the result: on an OCR-extracted (image)
+ * statement rather than a PDF text layer, a mismatch is more likely to be
+ * innocent digit-misreading noise than on a PDF, where extraction is exact.
+ */
+export function checkTransactionIntegrity(rows: StatementTransaction[], extractedViaOcr: boolean): AuthenticityCheckResult {
+  let mismatchCount = 0;
+  let previousBalance: number | null = null;
+
+  for (const row of rows) {
+    const amount = row.credit ?? row.debit ?? null;
+    if (amount !== null && previousBalance !== null) {
+      const actualDelta = Math.abs(row.balance - previousBalance);
+      if (Math.abs(actualDelta - amount) > BALANCE_RECONCILIATION_TOLERANCE) mismatchCount++;
+    }
+    previousBalance = row.balance;
+  }
+
+  if (mismatchCount === 0) {
+    return { status: "PASSED", reasons: [] };
+  }
+
+  const noise = extractedViaOcr
+    ? " This statement was read via OCR rather than a PDF text layer, so this may also reflect digit-misreading noise rather than tampering — worth checking against the original document either way."
+    : "";
+  return {
+    status: "FLAGGED",
+    reasons: [`${mismatchCount} transaction${mismatchCount === 1 ? "" : "s"} where the stated running balance doesn't reconcile with the transaction amount on that line.${noise}`],
+  };
 }
 
 export function computeMetrics(rows: StatementTransaction[]): StatementMetrics {

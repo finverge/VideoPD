@@ -368,6 +368,16 @@ model BankStatement {
   metricsJson      String? // { avgBalance, minBalance, totalCredits, totalDebits, bounceCount, estimatedMonthlyIncome, emiOutflow }
   eligibilityFlag        EligibilityFlag?
   eligibilityReasonsJson String? // string[] — always populated alongside eligibilityFlag so the underwriter sees *why*, never a bare verdict
+
+  // Real, deterministic document-authenticity signals (src/lib/bankStatement.ts's
+  // checkPdfMetadata + checkTransactionIntegrity) — PDF revision count/
+  // suspicious editing-tool metadata, and independent balance-vs-transaction
+  // arithmetic reconciliation. NOT a claim of detecting doctored visual
+  // content (a logo/image alteration) — that needs real image-forensics ML,
+  // explicitly out of scope, same footing as this app's other refused
+  // ML-only checks (see docs/videopd-future-work.md).
+  authenticityStatus       EvidenceCheckStatus @default(PENDING)
+  authenticityReasonsJson  String? // string[] — always populated alongside authenticityStatus, PASSED included, same convention as eligibilityReasonsJson
   createdAt     DateTime @default(now())
 }
 

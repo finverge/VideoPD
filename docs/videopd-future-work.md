@@ -248,6 +248,42 @@ rendered in the underwriter workspace UI — not a digitally signed/watermarked
 PDF artifact. No signing infrastructure (e.g., a certificate/HSM-backed
 signing service) is wired up.
 
+## 10a. Bank statement authenticity / tamper detection (requested live) — real checks built, visual/logo forgery explicitly out of scope
+
+**What's built:** two real, deterministic document-authenticity signals,
+neither an ML/forensic claim — just inspecting what's actually in the file:
+
+- **PDF metadata/structure** (`checkPdfMetadata`): revision count (a PDF
+  edited/re-saved after its original creation leaves a real, standard extra
+  `%%EOF` marker in the raw bytes — see `scripts/extract-pdf.js`'s
+  `countRevisions`), the Producer/Creator naming an image/design editor
+  (Photoshop, GIMP, Canva, …) rather than a banking/reporting system, and the
+  PDF's own internal ModDate meaningfully after its CreationDate.
+- **Transaction arithmetic reconciliation** (`checkTransactionIntegrity`):
+  each row's transaction amount and its running balance are extracted
+  independently from the same line (the balance-delta comparison in
+  `parseTransactions` only decides debit-vs-credit's *sign*; the amount's
+  own *value* is a separate capture group) — so verifying the balance
+  actually moved by the stated amount is a real, non-circular check, not a
+  re-derivation of the same number. Catches the classic tell of a doctored
+  statement: one number edited without correcting the other.
+
+Both feed a combined `authenticityStatus`/`authenticityReasonsJson` on
+`BankStatement`, shown loudly on the underwriter's case page either way — a
+clean result gets an explicit "Document authenticity verified — no signs of
+tampering detected" statement, not silence, and a flagged one also joins the
+Lead's queue-level risk flags (`BANK_STATEMENT_AUTHENTICITY`), same pattern
+as identity verification. Verified end-to-end against a real generated PDF
+with both signals deliberately present (Photoshop metadata + one tampered
+transaction line) through the actual running route.
+
+**What's explicitly NOT attempted:** detecting a doctored logo or altered
+visual content within the page image itself. That needs real image-
+forensics ML (error-level analysis, copy-move forgery detection) — the same
+"genuinely hard ML problem, no credible path without a trained model or
+vendor" category as deepfake/lip-sync detection above, not attempted rather
+than faked.
+
 ## 11. Bilingual transcript (BR-45) — done, with one caveat
 
 The dossier now includes a real English translation alongside each Q&A

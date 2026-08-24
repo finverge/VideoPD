@@ -20,11 +20,27 @@ if (!filePath) {
   process.exit(1);
 }
 
+// Revision count for document-authenticity checking (src/lib/bankStatement.ts's
+// checkPdfMetadata) — a legitimately single-pass-generated PDF has exactly one
+// "%%EOF" marker at the very end. A PDF that was later opened and re-saved by
+// an editor gets a new revision APPENDED (its own new xref/trailer/%%EOF),
+// leaving the original bytes intact underneath — a well-known, real PDF
+// forensics technique, not something invented for this: counting "%%EOF"
+// occurrences in the raw bytes reveals how many times the file was saved.
+// Read as latin1 (byte-for-byte, not a text encoding) since this is scanning
+// literal ASCII bytes in a binary file, not decoding text content.
+function countRevisions(bytes) {
+  const raw = bytes.toString("latin1");
+  const matches = raw.match(/%%EOF/g);
+  return matches ? matches.length : 0;
+}
+
 try {
   const bytes = fs.readFileSync(filePath);
+  const revisionCount = countRevisions(bytes);
   pdfParse(bytes)
     .then((result) => {
-      process.stdout.write(JSON.stringify({ text: result.text }));
+      process.stdout.write(JSON.stringify({ text: result.text, info: result.info ?? null, revisionCount }));
     })
     .catch((err) => {
       console.error(JSON.stringify({ error: err.message ?? String(err) }));
