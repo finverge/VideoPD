@@ -1,0 +1,84 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --canvas: 247 248 252;
+  --canvas-elevated: 255 255 255;
+  --ink-primary: 15 23 48;
+  --ink-secondary: 74 98 157;
+  --border-subtle: 231 235 246;
+}
+
+.dark {
+  --canvas: 10 15 31;
+  --canvas-elevated: 15 22 45;
+  --ink-primary: 244 246 251;
+  --ink-secondary: 156 174 211;
+  --border-subtle: 28 40 71;
+}
+
+* {
+  border-color: rgb(var(--border-subtle));
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background-color: rgb(var(--canvas));
+  color: rgb(var(--ink-primary));
+  font-feature-settings: "cv11", "ss01";
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background-color: rgb(28 178 125 / 0.25);
+}
+
+/* Custom scrollbar — subtle, not the default chunky one */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgb(var(--ink-secondary) / 0.3);
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgb(var(--ink-secondary) / 0.5);
+}
+
+/* Chat bubble entrance */
+@keyframes bubble-in {
+  0% {
+    opacity: 0;
+    transform: translateY(6px) scale(0.98);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+.animate-bubble-in {
+  animation: bubble-in 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* Voice waveform bars while listening */
+@keyframes wave {
+  0%,
+  100% {
+    transform: scaleY(0.3);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+.wave-bar {
+  animation: wave 1s ease-in-out infinite;
+  transform-origin: center;
+}

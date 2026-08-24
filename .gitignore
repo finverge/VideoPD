@@ -1,0 +1,20 @@
+node_modules
+.next
+out
+dev.db
+dev.db-journal
+*.log
+.env
+.env.local
+uploads/
+# Holds the coturn TURN relay's raw shared secret (TURN_STATIC_AUTH_SECRET,
+# see api/turn-credentials/route.ts) — real credential material, not a
+# reference to it, so this shouldn't be committed even in a prototype repo.
+turnserver.conf
+
+# Downloaded Tesseract OCR data (src/lib/bankStatement.ts) — a ~5MB binary
+# dependency artifact, not source; each environment fetches its own copy.
+eng.traineddata
+
+# TypeScript incremental build cache — regenerated, environment-specific.
+tsconfig.tsbuildinfo

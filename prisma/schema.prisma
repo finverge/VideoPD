@@ -1,0 +1,411 @@
+// Finverge VideoPD 2.0 — Digital Loan Origination Portal
+// Prototype data model, mirrors FIN-FSD-VIDEOPD-2.0 Section 13 (Key Data Entities).
+// SQLite for local-prototype simplicity; swap `provider`/`url` for the LOS data tier in production.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum Segment {
+  FARMER
+  VOCATIONAL_STUDENT
+  BUSINESS_OWNER
+}
+
+enum Language {
+  en
+  hi
+  te
+  ta
+  kn
+  ml
+}
+
+enum ApplicationStatus {
+  DRAFT
+  SUBMITTED
+  ANALYZED
+  EXPIRED
+}
+
+enum EvidenceType {
+  ID_PROOF
+  ADDRESS_PROOF
+  BUSINESS_PHOTO
+  BUSINESS_VIDEO
+  SELFIE
+  VIDEOPD_LIVENESS              // VideoPD Step 1 capture — distinct from the portal-stage SELFIE
+  VIDEOPD_BUSINESS_VERIFICATION // VideoPD Step 3 capture — distinct from portal-stage BUSINESS_PHOTO/VIDEO
+}
+
+enum VideoPdSessionStatus {
+  NOT_STARTED
+  IN_PROGRESS
+  COMPLETE
+}
+
+enum BankStatementStatus {
+  PENDING
+  EXTRACTED
+  NEEDS_REVIEW // extraction ran but confidence is low (e.g. scanned PDF with no text layer, or too few parsed transaction lines) — flagged for manual underwriter review, never silently treated as clean data
+  FAILED
+}
+
+enum EligibilityFlag {
+  ELIGIBLE
+  NEEDS_REVIEW
+  NOT_ELIGIBLE
+}
+
+enum EvidenceCheckStatus {
+  PENDING
+  PASSED
+  FLAGGED
+}
+
+enum LeadStatus {
+  NEW
+  UNDER_REVIEW
+  AWAITING_CHECKER_REVIEW
+  SENT_BACK
+  VIDEOPD_SCHEDULED
+  VIDEOPD_COMPLETE
+  APPROVED
+  REJECTED
+}
+
+// Underwriter Workspace maker-checker (Task: internal staff review, mirrors
+// the two-eyes pattern in the DLP LOS staff-portal's FSD-LOS-21, rebuilt
+// lightweight here against this prototype's own data rather than DLP's
+// separate backend — see conversation decision on which system to extend).
+enum UnderwriterRecommendation {
+  APPROVE
+  REJECT
+}
+
+enum ApproverDecision {
+  APPROVED
+  REJECTED
+  SENT_BACK
+}
+
+// FSD Section 13 — "Borrower Profile"
+model Borrower {
+  id            String   @id @default(cuid())
+  mobile        String   @unique
+  mobileVerified Boolean @default(false)
+  name          String?
+  dob           String?
+  segment       Segment?
+  language      Language @default(en)
+  addressLine   String?
+  consentDataUsage    Boolean @default(false)
+  consentBureauPull   Boolean @default(false)
+  consentMediaCapture Boolean @default(false)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  applications  LoanApplication[]
+  otps          OtpCode[]
+}
+
+// FSD Section 13 — "Loan Application"
+model LoanApplication {
+  id            String   @id @default(cuid())
+  borrowerId    String
+  borrower      Borrower @relation(fields: [borrowerId], references: [id])
+  segment       Segment
+  status        ApplicationStatus @default(DRAFT)
+
+  // Core sections (FSD 4.3.1)
+  fullName      String?
+  gender        String?
+  email         String?
+  maritalStatus String?
+  dependents    Int?
+  currentAddress   String?
+  permanentAddress String?
+  addressDurationYears Int?
+  ownershipStatus  String?
+  idType        String?
+  idNumber      String?
+  productType   String?
+  requestedAmount Int?
+  tenureMonths  Int?
+  loanPurpose   String?
+  incomeSource  String?
+  monthlyIncome Int?
+  existingObligations String?
+  bankAccountNumber String?
+  bankIfsc      String?
+  bankName      String?
+
+  // Segment-specific fields (FSD 4.3.2), stored as JSON for prototype flexibility
+  segmentFieldsJson String? // JSON blob: farmer | student | business fields
+
+  // Real client-side device fingerprint (src/lib/deviceFingerprint.ts —
+  // canvas/WebGL rendering signature + navigator/screen signals, hashed),
+  // captured at submit time. Feeds the SHARED_DEVICE risk flag when the
+  // same device shows up across different borrowers' applications
+  // (BR-35/36, docs/videopd-future-work.md item 5). Advisory only.
+  deviceFingerprint    String?
+  deviceSignalsJson    String? // raw component signals (userAgent, screen, timezone, ...), for underwriter transparency — not just an opaque hash
+
+  currentStep   Int      @default(0)
+  lastActiveAt  DateTime @default(now())
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  evidence      UploadedEvidence[]
+  transcripts   ChatTurn[]
+  lead          Lead?
+}
+
+// FSD Section 13 — "Uploaded Evidence"
+model UploadedEvidence {
+  id            String   @id @default(cuid())
+  applicationId String
+  application   LoanApplication @relation(fields: [applicationId], references: [id])
+  type          EvidenceType
+  fileName      String
+  filePath      String
+  mimeType      String
+  sizeBytes     Int
+  geoLat        Float?
+  geoLng        Float?
+  qualityStatus EvidenceCheckStatus @default(PENDING)
+  qualityNotes  String?
+  authenticityStatus EvidenceCheckStatus @default(PENDING)
+  authenticityNotes  String?
+
+  // Structured liveness/face-match signals behind authenticityStatus above,
+  // populated only for VIDEOPD_LIVENESS evidence (see api/videopd/[token]/
+  // liveness-result and src/lib/liveness.ts, src/lib/faceMatch.ts) — kept as
+  // discrete fields, not just the notes sentence, so the underwriter case
+  // page can render them as a real identity-verification panel rather than
+  // parsing prose back apart.
+  livenessBlinkCount     Int?
+  livenessNoFacePct      Int?     // 0-100, % of analyzed frames with no face detected at all
+  livenessLookedAwayPct  Int?     // 0-100, % of analyzed frames with a face turned away from camera
+  livenessOffCameraGlances Int?   // discrete look-away-then-back events, the actual coaching-detection signal (see AttentionTracker doc comment) — distinct from the cumulative % above
+  livenessRecordingSeconds Int?   // clip length; glance flagging is normalized against this rather than a flat count (see evaluateLivenessResult)
+  faceMatchDistance      Float?   // Euclidean distance vs. ID proof descriptor; <0.6 conventionally same person
+  faceMatchResult        Boolean? // null = not attempted (see authenticityNotes for why)
+
+  createdAt     DateTime @default(now())
+}
+
+// FSD Section 13 — "Chatbot Transcript" (one row per turn)
+model ChatTurn {
+  id            String   @id @default(cuid())
+  applicationId String
+  application   LoanApplication @relation(fields: [applicationId], references: [id])
+  role          String   // "user" | "assistant"
+  channel       String   // "voice" | "text"
+  language      Language
+  text          String
+  intent        String?
+  fieldUpdated  String?
+  createdAt     DateTime @default(now())
+}
+
+// FSD Section 13 — "Initial Summary Document"
+model InitialSummaryDocument {
+  id            String   @id @default(cuid())
+  leadId        String   @unique
+  lead          Lead     @relation(fields: [leadId], references: [id])
+  summaryJson   String   // structured summary: profile snapshot, loan ask, checklist, risk flags
+  generatedAt   DateTime @default(now())
+}
+
+// FSD Section 13 — "Lead"
+model Lead {
+  id            String   @id @default(cuid())
+  applicationId String   @unique
+  application   LoanApplication @relation(fields: [applicationId], references: [id])
+  status        LeadStatus @default(NEW)
+  riskFlagCount Int      @default(0)
+  riskSeverity  String   @default("none") // none | low | medium | high
+  assignedUnderwriter String? // staff name who currently holds/claimed this case — claim-ownership only, NOT decision attribution (a re-claim after send-back must not silently reattribute an earlier round's recorded recommendation, see underwriterName below)
+
+  // Maker: underwriter's recommendation. underwriterName is captured at decision
+  // time, deliberately separate from assignedUnderwriter — the same asymmetry
+  // approverName already has vs. any "claim" concept.
+  underwriterName           String?
+  underwriterRecommendation UnderwriterRecommendation?
+  underwriterNotes          String?
+  underwriterDecidedAt      DateTime?
+
+  // Checker: approver's decision (confirms or sends the case back)
+  approverName          String?
+  approverDecision      ApproverDecision?
+  approverNotes         String?
+  approverDecidedAt     DateTime?
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  summary       InitialSummaryDocument?
+  videoPdSession VideoPdSession?
+  decisions      LeadDecision[]
+}
+
+// Full audit trail of every maker-checker round. The single underwriter*/
+// approver* fields on Lead above only ever hold the *current* round — a
+// re-claim after SENT_BACK overwrites them, so a case that has gone through
+// a send-back cycle silently loses its earlier round's recommendation and
+// notes from view, even though a real recommend/decide cycle genuinely
+// happened. This table is the actual source of truth for "what happened,
+// when, by whom" across every round; the single fields on Lead are kept in
+// sync alongside it purely as a "current round at a glance" convenience.
+model LeadDecision {
+  id        String   @id @default(cuid())
+  leadId    String
+  lead      Lead     @relation(fields: [leadId], references: [id])
+  actorRole String   // "UNDERWRITER" | "APPROVER"
+  actorName String
+  // Underwriter rounds use UnderwriterRecommendation's vocabulary (APPROVE /
+  // REJECT); approver rounds use ApproverDecision's (APPROVED / REJECTED /
+  // SENT_BACK). Plain string rather than reusing either enum, since neither
+  // one alone covers both actors' vocabularies.
+  action    String
+  notes     String?
+  decidedAt DateTime @default(now())
+
+  @@index([leadId])
+}
+
+// VideoPD 2.0 guided-flow session (BRD Section 5.3/8.6, BR-21..BR-29) — the
+// MVP scope agreed for this build: a sequential guided flow (liveness capture
+// → skill/intent Q&A → business verification capture → bank statement upload)
+// rather than a live two-way WebRTC call. See docs/videopd-future-work.md for
+// what's deliberately deferred (real video calling, deepfake/voice-biometric
+// ML, multi-party calls, edge-cloud infra).
+model VideoPdSession {
+  id            String   @id @default(cuid())
+  leadId        String   @unique
+  lead          Lead     @relation(fields: [leadId], references: [id])
+  token         String   @unique // unguessable id in the borrower-facing link — this prototype's stand-in for a real SMS/WhatsApp-delivered, expiring, authenticated link (BR-21, Dependencies Section 12)
+  status        VideoPdSessionStatus @default(NOT_STARTED)
+  currentStep   Int      @default(0)
+  linkSentAt    DateTime @default(now())
+  startedAt     DateTime?
+  completedAt   DateTime?
+
+  skillIntentScore Int?    // 0-100, rule-based (BR-24, BR-43) — see lib/videoPdQuestions.ts
+  dossierJson      String? // compiled Actionable Dossier once complete (BR-44): score, consistency flags, bank-statement eligibility summary
+
+  answers        VideoPdAnswer[]
+  bankStatements BankStatement[]
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+model VideoPdAnswer {
+  id            String   @id @default(cuid())
+  sessionId     String
+  session       VideoPdSession @relation(fields: [sessionId], references: [id])
+  questionKey   String
+  questionText  String   // captured verbatim at answer time so the transcript reads correctly even if the question bank changes later
+  answerText    String
+  score         Int
+  createdAt     DateTime @default(now())
+
+  @@unique([sessionId, questionKey]) // re-answering (e.g. borrower goes back a step) upserts in place rather than duplicating
+}
+
+// Bank statement upload + local extraction (this conversation's explicit ask:
+// ICR/local extraction rather than a paid statement-analyzer service like
+// Perfios). See lib/bankStatement.ts for the extraction/eligibility pipeline.
+model BankStatement {
+  id            String   @id @default(cuid())
+  sessionId     String
+  session       VideoPdSession @relation(fields: [sessionId], references: [id])
+  fileName      String
+  filePath      String
+  mimeType      String
+  status        BankStatementStatus @default(PENDING)
+  extractedText String?  // raw OCR/PDF-text-layer output, kept for underwriter spot-checking against the parsed transactions below
+  transactionsJson String? // parsed { date, description, debit, credit, balance }[]
+  metricsJson      String? // { avgBalance, minBalance, totalCredits, totalDebits, bounceCount, estimatedMonthlyIncome, emiOutflow }
+  eligibilityFlag        EligibilityFlag?
+  eligibilityReasonsJson String? // string[] — always populated alongside eligibilityFlag so the underwriter sees *why*, never a bare verdict
+  createdAt     DateTime @default(now())
+}
+
+enum QuestionStatus {
+  DRAFT
+  APPROVED
+  ARCHIVED
+}
+
+// VideoPD Step 2 skill/intent Q&A, now admin-managed (BR-43: "configurable
+// against a lending partner's own credit parameters", extended per this
+// conversation to a draft -> review -> approve workflow instead of a
+// hardcoded file) — mirrors the maker-checker two-role split already used
+// for case decisions: any staff member drafts a question, only an APPROVER
+// can publish it, and only APPROVED questions are ever shown to a borrower.
+model VideoPdQuestionConfig {
+  id         String   @id @default(cuid())
+  segment    Segment
+  key        String   // stable identifier carried into VideoPdAnswer.questionKey
+  orderIndex Int      @default(0)
+  status     QuestionStatus @default(DRAFT)
+
+  promptEn String
+  promptHi String? // auto-translated on creation (see lib/translate.ts), editable before approval
+  promptTe String?
+  promptTa String?
+  promptKn String?
+  promptMl String?
+
+  createdBy  String?
+  approvedBy String?
+  approvedAt DateTime?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([segment, key])
+}
+
+// BR-43's "configurable against a lending partner's own credit parameters"
+// — a real, staff-editable risk-parameter set, not hardcoded constants.
+// Seeded with generic, industry-standard microfinance/NBFC underwriting
+// conventions (see src/lib/riskParameters.ts for citations), not Lakshya's
+// own calibrated risk appetite — BRD Section 12 lists that as an explicit
+// external dependency ("pending their baseline credit questionnaire and risk
+// parameters"). The point of this model is exactly that gap: once Lakshya
+// provides real numbers, updating them is a form submission during UAT, not
+// an engineering change and a redeploy.
+//
+// Keyed by segment (id = "FARMER" | "VOCATIONAL_STUDENT" | "BUSINESS_OWNER"),
+// not one global singleton — farm income is seasonal, a vocational student
+// typically has no current income at all, so these genuinely may need
+// different real numbers per segment. All three seed with the same generic
+// defaults (see riskParameters.ts's doc comment for why: no rigorous basis
+// exists yet to invent different starting numbers) but are independently
+// editable at /staff/risk-parameters.
+model RiskParameters {
+  id                            String   @id // one of the Segment enum's values
+  maxLoanToIncomeMultiple       Float    @default(36)   // requested amount vs monthly income — was a hardcoded magic number in mockChecks.ts, now here
+  assumedAnnualInterestRatePct  Float    @default(24)    // used only to estimate EMI for the affordability check below — not a real quoted rate, no rate is captured elsewhere in this data model
+  maxEmiToIncomeRatioPct        Float    @default(50)    // FOIR-style affordability cap: estimated EMI / stated monthly income
+  updatedBy                     String?
+  updatedAt                     DateTime @updatedAt
+}
+
+// Mock OTP store — dev-mode only stand-in for the SMS gateway (BRD Dependencies)
+model OtpCode {
+  id         String   @id @default(cuid())
+  borrowerId String
+  borrower   Borrower @relation(fields: [borrowerId], references: [id])
+  code       String
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime @default(now())
+}
