@@ -92,8 +92,8 @@ export async function descriptorFromImageUrl(url: string): Promise<Float32Array 
  * a face within it stays a large fraction of that tile, independent of the
  * source document's layout (not an Aadhaar-specific heuristic — this is a
  * standard sliding-window technique, applicable to any document shape). */
-async function detectFaceInLargeCanvas(canvas: HTMLCanvasElement): Promise<Float32Array | null> {
-  const GRID = 3; // 3x3 tiles
+async function detectFaceInLargeCanvas(canvas: HTMLCanvasElement, grid: number): Promise<Float32Array | null> {
+  const GRID = grid;
   const OVERLAP = 0.15; // so a face straddling a tile boundary isn't missed by both neighbors
   const tileW = canvas.width / GRID;
   const tileH = canvas.height / GRID;
@@ -147,7 +147,16 @@ async function descriptorFromPdfBlob(blob: Blob): Promise<Float32Array | null> {
   const ctx = canvas.getContext("2d");
   if (!ctx) return null;
   await page.render({ canvasContext: ctx, viewport, canvas } as any).promise;
-  return detectFaceInLargeCanvas(canvas);
+
+  // Coarse-to-fine cascade: a document where the whole card (and its photo)
+  // occupies most of the page — an Aadhaar scan — is found fast on a coarse
+  // 3x3 pass. A document where the card itself is a small corner of a much
+  // larger page — confirmed live on a real PAN card PDF — needs a finer
+  // grid before the photo occupies enough of any one tile to detect: 3x3
+  // found nothing at all on that real case; 6x6 did. Trying 3x3 first keeps
+  // the common (larger-document) case fast, only paying the slower, finer
+  // pass's cost on the harder case that actually needs it.
+  return (await detectFaceInLargeCanvas(canvas, 3)) ?? (await detectFaceInLargeCanvas(canvas, 6));
 }
 
 /** ID proof can be an image or a PDF — dispatches on the response's actual

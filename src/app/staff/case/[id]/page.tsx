@@ -757,7 +757,15 @@ function IdentityVerificationCard({ evidence }: { evidence: EvidenceRow[] }) {
   const liveness = evidence.find((e) => e.type === "VIDEOPD_LIVENESS");
   if (!liveness) return null; // borrower hasn't reached Step 1 yet — nothing to show
 
-  const idProof = evidence.find((e) => e.type === "ID_PROOF" && e.mimeType.startsWith("image/"));
+  // Any ID proof, image or PDF (a real, common shape — DigiLocker/scanned
+  // Aadhaar downloads) — this used to only look for an image, so a PDF ID
+  // proof showed "No ID proof photo on file" even though one was clearly
+  // uploaded (reported live), reading as if face-match couldn't possibly be
+  // running at all. Face-match itself already handles a PDF ID proof fine
+  // (see faceMatch.ts's descriptorFromIdProofUrl) — this was purely a
+  // display gap, not a face-match gap.
+  const idProof = evidence.find((e) => e.type === "ID_PROOF");
+  const idProofIsImage = idProof?.mimeType.startsWith("image/") ?? false;
   const notComputed = liveness.authenticityStatus === "PENDING";
   const passed = liveness.authenticityStatus === "PASSED";
 
@@ -778,9 +786,20 @@ function IdentityVerificationCard({ evidence }: { evidence: EvidenceRow[] }) {
         <div>
           <p className="mb-1 text-[11px] font-bold uppercase tracking-wide text-ink-400">ID proof photo</p>
           <div className="flex aspect-[4/3] items-center justify-center overflow-hidden rounded-xl bg-ink-50 dark:bg-ink-800/40">
-            {idProof ? (
+            {idProof && idProofIsImage ? (
               // eslint-disable-next-line @next/next/no-img-element
               <img src={`/api/staff/evidence/${idProof.id}`} alt="ID proof" className="h-full w-full object-cover" />
+            ) : idProof ? (
+              <a
+                href={`/api/staff/evidence/${idProof.id}`}
+                target="_blank"
+                rel="noreferrer"
+                className="flex flex-col items-center gap-1.5 text-xs font-semibold text-ink-500 hover:text-sprout-600"
+              >
+                <FileText className="h-6 w-6" />
+                ID proof is a PDF — View file
+                <span className="font-normal text-ink-400">(face-match still runs against it)</span>
+              </a>
             ) : (
               <p className="px-2 text-center text-[11px] text-ink-400">No ID proof photo on file</p>
             )}
