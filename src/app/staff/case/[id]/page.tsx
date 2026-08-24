@@ -83,6 +83,13 @@ interface BankStatementRow {
   metricsJson: string | null;
 }
 
+interface CallTranscriptSegmentRow {
+  id: string;
+  speakerName: string;
+  text: string;
+  createdAt: string;
+}
+
 interface VideoPdSessionData {
   id: string;
   token: string;
@@ -93,6 +100,7 @@ interface VideoPdSessionData {
   dossierJson: string | null;
   answers: VideoPdAnswerRow[];
   bankStatements: BankStatementRow[];
+  callTranscript: CallTranscriptSegmentRow[];
 }
 
 interface CaseDetailData {
@@ -612,8 +620,10 @@ function VideoPdSection({
               </button>
             )}
           </div>
-          <LiveCallRoom roomId={session.token} displayName={staffName} />
+          <LiveCallRoom roomId={session.token} displayName={staffName} transcribe />
         </div>
+
+        <CallTranscriptPanel segments={session.callTranscript} />
       </div>
     );
   }
@@ -713,6 +723,32 @@ function VideoPdSection({
           </div>
         </div>
       )}
+
+      <CallTranscriptPanel segments={session.callTranscript} />
+    </div>
+  );
+}
+
+/** Persisted transcript from any live call(s) on this session — separate
+ * from the in-call live view (LiveCallRoom's own "Live transcript" panel,
+ * only visible while actually in the call); this is what survives after
+ * everyone's left, so an underwriter reviewing the case later still sees
+ * what was said. Renders nothing at all if no call ever happened — an
+ * empty "no transcript" card for the ~most common case (no live call used)
+ * would just be noise. */
+function CallTranscriptPanel({ segments }: { segments: { id: string; speakerName: string; text: string; createdAt: string }[] }) {
+  if (segments.length === 0) return null;
+  return (
+    <div className="mt-4 border-t border-ink-100 pt-4 dark:border-ink-800">
+      <p className="mb-2 text-xs font-bold uppercase tracking-wide text-ink-400">Call transcript</p>
+      <div className="max-h-64 space-y-1.5 overflow-y-auto rounded-xl bg-ink-50 p-3 dark:bg-ink-800/40">
+        {segments.map((s) => (
+          <p key={s.id} className="text-xs leading-relaxed text-ink-700 dark:text-ink-300">
+            <span className="font-semibold text-ink-500 dark:text-ink-400">{s.speakerName}:</span> {s.text}
+            <span className="ml-1.5 text-[10px] text-ink-300 dark:text-ink-600">{new Date(s.createdAt).toLocaleTimeString()}</span>
+          </p>
+        ))}
+      </div>
     </div>
   );
 }

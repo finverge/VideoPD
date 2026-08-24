@@ -312,8 +312,31 @@ model VideoPdSession {
 
   answers        VideoPdAnswer[]
   bankStatements BankStatement[]
+  callTranscript CallTranscriptSegment[]
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
+}
+
+// Real-time transcription of the live WebRTC call (/call/[token],
+// LiveCallRoom/useCallRoom) — requested live: the call itself is
+// deliberately never recorded (see LiveCallRoom's own doc comment), but a
+// text transcript doesn't need the audio/video kept at all. Each
+// participant's own browser runs real speech-to-text (Web Speech API,
+// same tech as the chatbot's voice input, src/lib/speech.ts) on their own
+// microphone and posts each recognized segment here as it's captured —
+// genuinely real, not a placeholder, with an honest constraint: it can
+// only transcribe what a participant's own local mic picks up, not "listen
+// in" on the remote side directly, and needs a Chrome-based browser
+// (Web Speech API has limited/no support elsewhere).
+model CallTranscriptSegment {
+  id          String   @id @default(cuid())
+  sessionId   String
+  session     VideoPdSession @relation(fields: [sessionId], references: [id])
+  speakerName String   // the displayName passed to LiveCallRoom for that participant (e.g. "Borrower", the staff member's name, or a 3rd-party guest's own name)
+  text        String
+  createdAt   DateTime @default(now())
+
+  @@index([sessionId])
 }
 
 model VideoPdAnswer {

@@ -114,7 +114,7 @@ export default function VideoPdSessionPage() {
                 currentStep at all, just an optional live conversation. */}
             <div className="mt-4 border-t border-ink-100 pt-4 dark:border-ink-800">
               {showLiveCall ? (
-                <LiveCallRoom roomId={params.token} displayName="Borrower" analyzeLiveness />
+                <LiveCallRoom roomId={params.token} displayName="Borrower" analyzeLiveness transcribe lang={lang} />
               ) : (
                 <button
                   onClick={() => setShowLiveCall(true)}

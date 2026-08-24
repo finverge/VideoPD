@@ -48,6 +48,21 @@ of the camera-access limitation below. Runs via `docker run` (see README);
 gracefully degrades to STUN-only if the container isn't running or
 `TURN_STATIC_AUTH_SECRET` isn't set.
 
+**Also built (requested live):** real-time transcription of the call —
+each participant's own browser runs continuous speech-to-text (Web Speech
+API, same tech already used for the chatbot's voice input) on their own
+microphone, broadcasts each recognized segment to the room over the
+existing signal channel, and persists it (`CallTranscriptSegment`) for
+later review on the underwriter's case page. Honest constraints: it can
+only transcribe what a participant's own local mic picks up, not "listen
+in" on the remote side directly, so a complete transcript needs every
+participant to have it running on their own instance (on by default on all
+three call surfaces — borrower, underwriter, 3rd-party guest); Chrome/Edge
+only, same as everywhere else this browser API is used in this app. The
+persistence route and underwriter display are verified end-to-end against
+the real running server; the actual speech recognition itself couldn't be —
+same camera/mic-access sandbox limitation as the rest of this item.
+
 **What's still missing:** the coturn container currently binds to whatever
 this machine's Docker Desktop exposes — real cross-network reachability from
 an arbitrary demo network depends on where this actually gets deployed (a

@@ -12,6 +12,7 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
         include: {
           answers: { orderBy: { createdAt: "asc" } },
           bankStatements: { orderBy: { createdAt: "desc" } },
+          callTranscript: { orderBy: { createdAt: "asc" } },
         },
       },
       application: {

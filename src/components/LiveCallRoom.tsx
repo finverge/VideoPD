@@ -1,10 +1,11 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Mic, MicOff, Video as VideoIcon, VideoOff, PhoneOff, PhoneCall, Loader2, AlertTriangle, Users, WifiOff, Headphones, Eye, EyeOff } from "lucide-react";
+import { Mic, MicOff, Video as VideoIcon, VideoOff, PhoneOff, PhoneCall, Loader2, AlertTriangle, Users, WifiOff, Headphones, Eye, EyeOff, Captions } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useCallRoom, type CallParticipant } from "@/lib/useCallRoom";
 import { Button } from "@/components/ui/Button";
+import type { LangCode } from "@/types";
 
 // Same self-hosted signaling server for both the borrower and underwriter
 // side of a call — see server/signaling-server.ts and src/lib/useCallRoom.ts
@@ -22,6 +23,8 @@ export function LiveCallRoom({
   roomId,
   displayName,
   analyzeLiveness = false,
+  transcribe = false,
+  lang = "en",
 }: {
   roomId: string;
   displayName: string;
@@ -30,16 +33,31 @@ export function LiveCallRoom({
    * outgoing video and broadcasts it to everyone else in the room as a live
    * indicator. See useCallRoom's own doc comment for the full explanation. */
   analyzeLiveness?: boolean;
+  /** Real-time transcription of this participant's own speech (Web Speech
+   * API — see useCallRoom's own doc comment). Safe to enable on every
+   * instance in a call; each side only ever transcribes its own mic. */
+  transcribe?: boolean;
+  lang?: LangCode;
 }) {
-  const { joined, localStream, participants, error, audioOnly, connectionQuality, join, leave, toggleMic, toggleCamera, setAudioOnly } = useCallRoom({
+  const {
+    joined, localStream, participants, error, audioOnly, connectionQuality, transcriptSegments,
+    join, leave, toggleMic, toggleCamera, setAudioOnly,
+  } = useCallRoom({
     signalingUrl: SIGNALING_URL,
     roomId,
     displayName,
     analyzeLiveness,
+    transcribe,
+    lang,
   });
   const [micOn, setMicOn] = useState(true);
   const [camOn, setCamOn] = useState(true);
   const [joining, setJoining] = useState(false);
+  const transcriptListRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    transcriptListRef.current?.scrollTo({ top: transcriptListRef.current.scrollHeight, behavior: "smooth" });
+  }, [transcriptSegments]);
 
   async function handleJoin() {
     setJoining(true);
@@ -79,6 +97,31 @@ export function LiveCallRoom({
           </div>
         )}
       </div>
+
+      {/* Live transcript — real speech-to-text (Web Speech API) from each
+          participant's own instance, broadcast to everyone in the room and
+          persisted per-segment (see useCallRoom's transcribe option). Only
+          shown when at least one side actually has it on — an empty,
+          permanently-blank panel would just be confusing chrome. */}
+      {transcribe && (
+        <div className="rounded-xl border border-ink-100 bg-ink-50/50 dark:border-ink-800 dark:bg-ink-800/30">
+          <div className="flex items-center gap-1.5 border-b border-ink-100 px-3 py-1.5 dark:border-ink-800">
+            <Captions className="h-3.5 w-3.5 text-ink-400" />
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-400">Live transcript</p>
+          </div>
+          <div ref={transcriptListRef} className="max-h-32 space-y-1 overflow-y-auto px-3 py-2">
+            {transcriptSegments.length === 0 ? (
+              <p className="text-xs italic text-ink-400">Nothing transcribed yet — starts as soon as someone speaks.</p>
+            ) : (
+              transcriptSegments.map((s, i) => (
+                <p key={i} className="text-xs leading-relaxed text-ink-700 dark:text-ink-300">
+                  <span className="font-semibold text-ink-500 dark:text-ink-400">{s.speakerName}:</span> {s.text}
+                </p>
+              ))
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Real, measured signal (RTCPeerConnection.getStats() — packet loss /
           round-trip time), not a guess — but advisory only, same as every

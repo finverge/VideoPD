@@ -101,7 +101,7 @@ export default function CallGuestPage() {
       {state === "call" && (
         <Card>
           <h1 className="mb-4 text-center text-lg font-bold text-ink-900 dark:text-white">Verification call</h1>
-          <LiveCallRoom roomId={params.token} displayName={name.trim()} />
+          <LiveCallRoom roomId={params.token} displayName={name.trim()} transcribe />
         </Card>
       )}
     </main>

@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { averageEAR, estimateYawOffset, BlinkTracker, LOOKED_AWAY_YAW_THRESHOLD } from "@/lib/liveness";
+import { SPEECH_LOCALE } from "@/lib/i18n";
+import type { LangCode } from "@/types";
 // faceModels.ts pulls in face-api.js/TensorFlow.js — a large bundle. Loaded
 // dynamically inside startLivenessAnalysis below, only on the code path
 // that actually runs analyzeLiveness, so every other page that uses this
@@ -66,6 +68,16 @@ export interface CallParticipant {
   liveSignal: LiveSignal | null;
 }
 
+/** One live transcript line — either this participant's own speech or
+ * another participant's, broadcast over the same signal channel as the
+ * liveness data above. speakerName is whatever displayName that
+ * participant joined with. */
+export interface TranscriptSegment {
+  speakerName: string;
+  text: string;
+  at: number; // Date.now() when produced, for stable ordering/keys
+}
+
 // Connection-quality thresholds for the audio-fallback suggestion below —
 // commonly cited rules of thumb (packet loss above ~5-10% and round-trip
 // time above a few hundred ms are both widely treated as the point video
@@ -108,6 +120,8 @@ export function useCallRoom({
   roomId,
   displayName,
   analyzeLiveness = false,
+  transcribe = false,
+  lang = "en",
 }: {
   signalingUrl: string;
   roomId: string;
@@ -122,6 +136,19 @@ export function useCallRoom({
    * underwriter's — nobody is monitored without deliberately turning this on
    * for their own outgoing feed. */
   analyzeLiveness?: boolean;
+  /** When true, runs continuous speech-to-text (Web Speech API, same tech
+   * as the chatbot's voice input — src/lib/speech.ts) on this participant's
+   * own microphone for as long as they're in the call, broadcasts each
+   * recognized segment to every other participant (transcriptSegments
+   * below), and persists it to the session's CallTranscriptSegment record.
+   * Each side transcribes its own audio — Web Speech API has no way to
+   * listen to a remote MediaStreamTrack directly, only the local mic, so a
+   * full transcript needs every participant to opt in on their own
+   * instance. Genuinely real, not a placeholder: Chrome/Edge only (limited/
+   * no support elsewhere), and quality depends on the same real-world
+   * factors any speech recognizer does (accent, background noise, network). */
+  transcribe?: boolean;
+  lang?: LangCode;
 }) {
   const [joined, setJoined] = useState(false);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
@@ -129,6 +156,7 @@ export function useCallRoom({
   const [error, setError] = useState<string | null>(null);
   const [audioOnly, setAudioOnlyState] = useState(false);
   const [connectionQuality, setConnectionQuality] = useState<ConnectionQuality>("unknown");
+  const [transcriptSegments, setTranscriptSegments] = useState<TranscriptSegment[]>([]);
 
   const wsRef = useRef<WebSocket | null>(null);
   const pcsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
@@ -142,6 +170,8 @@ export function useCallRoom({
   const analysisVideoRef = useRef<HTMLVideoElement | null>(null);
   const blinkTrackerRef = useRef<BlinkTracker | null>(null);
   const livenessAnalyzingRef = useRef(false);
+  const recognitionRef = useRef<SpeechRecognition | null>(null);
+  const transcribingRef = useRef(false); // true only while the call wants transcription active — recognition.onend uses this to decide whether to auto-restart or genuinely stop
 
   const updateParticipant = useCallback((peerId: string, patch: Partial<CallParticipant>) => {
     setParticipants((prev) => {
@@ -186,6 +216,73 @@ export function useCallRoom({
     }
     blinkTrackerRef.current = null;
   }, []);
+
+  const stopTranscription = useCallback(() => {
+    transcribingRef.current = false;
+    recognitionRef.current?.stop();
+    recognitionRef.current = null;
+  }, []);
+
+  // Continuous speech-to-text on this participant's own mic for the whole
+  // call, not the chat's single-utterance mode (src/lib/speech.ts's
+  // useSpeech, continuous: false) — a live call needs to keep listening
+  // across pauses. Web Speech API's own `continuous: true` still
+  // legitimately stops on some browsers after enough silence (fires
+  // onend), so this restarts itself for as long as transcribingRef stays
+  // true, rather than treating every onend as "the call ended".
+  const startTranscription = useCallback(() => {
+    const SpeechRecognitionCtor =
+      typeof window !== "undefined" ? (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition : null;
+    if (!SpeechRecognitionCtor) return; // not supported on this browser — silently no transcript from this side, same as everywhere else this API is used
+
+    transcribingRef.current = true;
+
+    const startOne = () => {
+      if (!transcribingRef.current) return;
+      const recognition: SpeechRecognition = new SpeechRecognitionCtor();
+      recognition.lang = SPEECH_LOCALE[lang] ?? SPEECH_LOCALE.en;
+      recognition.interimResults = false; // only final segments get broadcast/persisted — interim text changes too fast to be a useful transcript line
+      recognition.continuous = true;
+      recognition.maxAlternatives = 1;
+
+      recognition.onresult = (event: SpeechRecognitionEvent) => {
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const res = event.results[i];
+          if (!res.isFinal) continue;
+          const text = res[0].transcript.trim();
+          if (!text) continue;
+          const segment: TranscriptSegment = { speakerName: displayName, text, at: Date.now() };
+          setTranscriptSegments((prev) => [...prev, segment]);
+          send({ type: "signal", payload: { kind: "transcript", speakerName: displayName, text } });
+          fetch(`/api/call/${roomId}/transcript`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ speakerName: displayName, text }),
+          }).catch(() => {}); // best-effort persistence — a dropped save shouldn't interrupt the live call or the live transcript view, which already has it via the broadcast above
+        }
+      };
+
+      recognition.onerror = () => {
+        // "no-speech"/"aborted" etc. are normal over a whole call (silence,
+        // brief network hiccups) — onend below handles restarting either way.
+      };
+      recognition.onend = () => {
+        if (transcribingRef.current) startOne(); // still in the call and still wanted — keep listening
+      };
+
+      recognitionRef.current = recognition;
+      try {
+        recognition.start();
+      } catch {
+        // start() can throw if called again too quickly after a previous
+        // instance's stop() hasn't fully settled — the next onend/restart
+        // cycle recovers on its own, nothing to surface to the user for one
+        // skipped restart.
+      }
+    };
+
+    startOne();
+  }, [displayName, lang, roomId, send]);
 
   // Runs the same real blink/gaze detection as the async Step 1 recording,
   // continuously, on this participant's own outgoing video for as long as
@@ -307,6 +404,7 @@ export function useCallRoom({
     localStreamRef.current = stream;
     setLocalStream(stream);
     if (analyzeLiveness) startLivenessAnalysis(stream);
+    if (transcribe) startTranscription();
 
     const peerId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const ws = new WebSocket(signalingUrl);
@@ -385,6 +483,17 @@ export function useCallRoom({
         return;
       }
 
+      if (msg.type === "signal" && msg.payload?.kind === "transcript") {
+        // Only append what OTHER participants broadcast — this side's own
+        // segments are already appended locally the moment recognition
+        // produces them (startTranscription above), so appending again here
+        // would duplicate every one of this side's own lines.
+        const speakerName = typeof msg.payload.speakerName === "string" ? msg.payload.speakerName : "Unknown";
+        const text = typeof msg.payload.text === "string" ? msg.payload.text : "";
+        if (text) setTranscriptSegments((prev) => [...prev, { speakerName, text, at: Date.now() }]);
+        return;
+      }
+
       if (msg.type === "room-full") {
         joiningRef.current = false;
         setError("This call already has the maximum number of participants.");
@@ -396,7 +505,7 @@ export function useCallRoom({
         return;
       }
     };
-  }, [signalingUrl, roomId, displayName, joined, analyzeLiveness, startLivenessAnalysis, createPeerConnection, send, updateParticipant, removeParticipant]);
+  }, [signalingUrl, roomId, displayName, joined, analyzeLiveness, startLivenessAnalysis, transcribe, startTranscription, createPeerConnection, send, updateParticipant, removeParticipant]);
 
   const leave = useCallback(() => {
     send({ type: "leave" });
@@ -414,12 +523,13 @@ export function useCallRoom({
       qualityIntervalRef.current = null;
     }
     stopLivenessAnalysis();
+    stopTranscription();
     setLocalStream(null);
     setParticipants(new Map());
     setJoined(false);
     setAudioOnlyState(false);
     setConnectionQuality("unknown");
-  }, [send, stopLivenessAnalysis]);
+  }, [send, stopLivenessAnalysis, stopTranscription]);
 
   // Leave the call if the component unmounts while still connected — a
   // borrower/underwriter navigating away shouldn't leave a dangling peer.
@@ -479,6 +589,7 @@ export function useCallRoom({
     error,
     audioOnly,
     connectionQuality,
+    transcriptSegments,
     join,
     leave,
     toggleMic,
