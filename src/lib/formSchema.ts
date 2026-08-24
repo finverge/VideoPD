@@ -11,6 +11,18 @@ export interface FieldDef {
   // value/label. For a small, known set of speech-to-text mishearings or
   // autocorrect substitutions — not a general fuzzy-match mechanism.
   choices?: { value: string; labelKey: string; aliases?: string[] }[];
+  // choicesBySegment: narrows `choices` to just the options relevant to a
+  // specific segment (e.g. loan product) — BRD Section 3's own segment
+  // descriptions already imply a natural per-segment subset ("Vocational-
+  // training students — education/skilling loans"; "Small factory/workshop
+  // owners — working-capital or asset-purchase loans"; "Farmers — seasonal/
+  // agri-input and equipment finance"), but the picker previously showed the
+  // same undifferentiated full list to every segment regardless (reported
+  // live — "why is it asking for loan product again" right after already
+  // picking Business/Student, seeing Education/Agri Input options that
+  // don't fit). Falls back to `choices` for a segment not listed here, or
+  // when segment isn't known yet (resolveChoices below).
+  choicesBySegment?: Partial<Record<SegmentCode, { value: string; labelKey: string; aliases?: string[] }[]>>;
   required?: boolean;
   step: number; // wizard step index this field belongs to
   hint?: string; // small persistent guidance text shown below the field
@@ -96,12 +108,30 @@ export const CORE_FIELDS: FieldDef[] = [
     type: "choice",
     required: true,
     step: 3,
+    // Fallback (segment not yet known) — the full list.
     choices: [
       { value: "working_capital", labelKey: "Working Capital" },
       { value: "asset_purchase", labelKey: "Asset Purchase" },
       { value: "education", labelKey: "Education" },
       { value: "agri_input", labelKey: "Agri Input" },
     ],
+    // Per-segment subset, straight from the BRD's own segment descriptions
+    // (Section 3): "Farmers — seasonal/agri-input and equipment finance",
+    // "Vocational-training students — education/skilling loans", "Small
+    // factory/workshop owners — working-capital or asset-purchase loans".
+    choicesBySegment: {
+      FARMER: [
+        { value: "agri_input", labelKey: "Agri Input" },
+        { value: "asset_purchase", labelKey: "Asset Purchase" },
+      ],
+      VOCATIONAL_STUDENT: [
+        { value: "education", labelKey: "Education" },
+      ],
+      BUSINESS_OWNER: [
+        { value: "working_capital", labelKey: "Working Capital" },
+        { value: "asset_purchase", labelKey: "Asset Purchase" },
+      ],
+    },
   },
   { key: "requestedAmount", labelKey: "requestedAmount", type: "number", required: true, step: 3 },
   { key: "tenureMonths", labelKey: "tenureMonths", type: "number", required: true, step: 3 },
@@ -160,8 +190,14 @@ export function getWizardSteps(): readonly string[] {
   return [...CORE_STEPS, SEGMENT_STEP_LABEL, UPLOAD_STEP_LABEL, REVIEW_STEP_LABEL];
 }
 
-export function fieldsForStep(stepIndex: number): FieldDef[] {
-  return CORE_FIELDS.filter((f) => f.step === stepIndex);
+function resolveChoices(field: FieldDef, segment?: SegmentCode) {
+  return (segment && field.choicesBySegment?.[segment]) ?? field.choices;
+}
+
+export function fieldsForStep(stepIndex: number, segment?: SegmentCode): FieldDef[] {
+  return CORE_FIELDS.filter((f) => f.step === stepIndex).map((f) =>
+    f.choicesBySegment ? { ...f, choices: resolveChoices(f, segment) } : f
+  );
 }
 
 /** Minimal shape the dialog manager needs — CORE_FIELDS entries satisfy this too. */
@@ -183,7 +219,7 @@ export interface ChatFieldDef {
  * are reused across segments with different labels/meaning. */
 export function findFieldDef(key: string, segment?: SegmentCode): ChatFieldDef | undefined {
   const core = CORE_FIELDS.find((f) => f.key === key);
-  if (core) return core;
+  if (core) return core.choicesBySegment ? { ...core, choices: resolveChoices(core, segment) } : core;
   if (segment) return SEGMENT_FIELDS[segment]?.find((f) => f.key === key);
   return undefined;
 }

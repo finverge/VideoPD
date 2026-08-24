@@ -144,7 +144,7 @@ export default function ApplyPage() {
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
-  const currentCoreFields = step < CORE_STEPS.length ? fieldsForStep(step) : [];
+  const currentCoreFields = step < CORE_STEPS.length ? fieldsForStep(step, segment) : [];
   const activeFieldKey = useMemo(() => {
     const empty = currentCoreFields.find((f) => !fields[f.key]);
     return empty?.key ?? null;
