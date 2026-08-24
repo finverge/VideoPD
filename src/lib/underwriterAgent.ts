@@ -1,15 +1,57 @@
 /**
  * Draft underwriter recommendation — synthesizes the real signals already
- * computed elsewhere in this app (risk flags, dossier flags, bank statement
- * eligibility/authenticity, identity verification) into a suggested
- * APPROVE/REJECT with written reasoning, to pre-fill the underwriter's own
- * decision form. This NEVER decides anything on its own — the underwriter
- * still has to read it and explicitly click Recommend Approve/Reject
- * themselves; nothing here writes to the database or advances a case.
- * BRD Section 7.2 excludes "automated, non-underwriter-reviewed credit
- * decisioning" outright (see docs/videopd-future-work.md's "Permanent scope
- * boundaries" section) — this is advisory input to that human decision,
- * same as every other check in this codebase, not a decision itself.
+ * computed elsewhere in this app into a suggested APPROVE/REJECT with
+ * written reasoning, to pre-fill the underwriter's own decision form. This
+ * NEVER decides anything on its own — the underwriter still has to read it
+ * and explicitly click Recommend Approve/Reject themselves; nothing here
+ * writes to the database or advances a case. BRD Section 7.2 excludes
+ * "automated, non-underwriter-reviewed credit decisioning" outright (see
+ * docs/videopd-future-work.md's "Permanent scope boundaries" section) —
+ * this is advisory input to that human decision, same as every other check
+ * in this codebase, not a decision itself.
+ *
+ * Complete, exact list of what this DOES consider (every real signal that
+ * exists in this app as of this build), and what it explicitly does NOT —
+ * for a customer-facing explanation of what actually feeds the draft:
+ *
+ *   CONSIDERED:
+ *   - Face match (borrower's liveness recording vs. their ID proof photo) —
+ *     a failed match is a blocker.
+ *   - Bank statement authenticity (PDF metadata/revision tampering signals,
+ *     transaction-arithmetic reconciliation) — a flagged result is a blocker.
+ *   - Bank statement eligibility (bounce/balance/EMI-affordability rules) —
+ *     NOT_ELIGIBLE is a blocker, NEEDS_REVIEW is a caution.
+ *   - Live Consistency Engine: stated income during the VideoPD Q&A vs. the
+ *     income declared on the application, AND bank-statement-derived income
+ *     vs. declared income — both are "amount declared vs. what was actually
+ *     said/shown" checks, surfaced as cautions.
+ *   - Cross-applicant answer similarity (a scripted/coached-answer signal)
+ *     — caution.
+ *   - Every other queue-level risk flag this app computes (SHARED_DEVICE,
+ *     AMOUNT_OUTLIER, EMI_AFFORDABILITY, MULTIPLE_APPLICATIONS, DOC_QUALITY,
+ *     INCOMPLETE) — bucketed by whatever severity that check already
+ *     assigned itself.
+ *   - Missing identity/business-verification capture, or no bank statement
+ *     ever provided — treated as a blocker, not just a caution: a case can
+ *     reach VideoPD "COMPLETE" status even when one specific capture step
+ *     silently never happened, so this is a genuinely separate check from
+ *     "was the session marked complete."
+ *   - Low-effort/echoed Q&A answers (answer largely repeats the question's
+ *     own wording) — caution.
+ *   - Skill/intent Q&A engagement score — caution if low.
+ *
+ *   NOT CONSIDERED, because the check doesn't exist anywhere in this app yet:
+ *   - Geo-location "mismatch." Geo-tag coordinates are captured and shown to
+ *     the underwriter, but nothing compares them against the declared
+ *     address or flags an inconsistency — that's a display feature, not a
+ *     check, so there is no such signal for the agent to use.
+ *   - ID-document text fields (e.g., the ID number printed on the uploaded
+ *     proof) vs. the ID number typed into the application. Only the PHOTO
+ *     is compared (face match) — no OCR-based ID-number extraction/
+ *     cross-check exists.
+ *   - Lip-sync, background-voice/coaching, or deepfake detection — refused
+ *     outright elsewhere in this app (see docs/videopd-future-work.md),
+ *     never attempted, so obviously not fed in here either.
  *
  * Honest about what "AI agent" means here: this is deterministic,
  * transparent rule synthesis over real, already-computed signals — not a
@@ -91,11 +133,26 @@ export function draftUnderwriterRecommendation(input: DraftRecommendationInput):
     else cautions.push(`${f.label}: ${f.detail}`);
   }
 
-  // Consistency-type dossier flags (Live Consistency Engine, cross-applicant
-  // answer similarity) are a real fraud signal, not just incompleteness —
-  // weighted as a caution, not automatically a blocker on their own.
+  // Consistency-type dossier flags (Live Consistency Engine — bank-statement-
+  // vs-declared income, Q&A-vs-declared income, cross-applicant answer
+  // similarity) are a real fraud signal, not just incompleteness — weighted
+  // as a caution, not automatically a blocker on their own.
+  //
+  // Completeness-type flags (liveness/business-verification capture missing,
+  // bank statement never provided) are a genuinely more serious gap than a
+  // caution — VideoPdSession.status can reach COMPLETE even when a specific
+  // capture never actually happened (the borrower finished the flow, but
+  // one step silently failed or was skipped), so videoPdComplete above being
+  // true does NOT already guarantee this. Treated as a blocker: verification
+  // that never actually happened shouldn't produce a clean APPROVE draft.
+  //
+  // Engagement-type flags (an answer largely echoing the question's own
+  // wording — a low-effort/scripted-response signal, not proof of anything
+  // by itself) are a caution.
   for (const f of dossierFlags) {
     if (f.type === "consistency") cautions.push(`${f.label}: ${f.detail}`);
+    else if (f.type === "completeness") blockers.push(`${f.label}: ${f.detail}`);
+    else if (f.type === "engagement") cautions.push(`${f.label}: ${f.detail}`);
   }
 
   if (skillIntentScore !== null) {
