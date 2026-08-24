@@ -24,7 +24,12 @@ const YES_WORDS = [
   // from the word-boundary issue below.
   "yes", "yeah", "yep", "correct", "right", "haan", "ok", "okay", "sure", "save", "confirm", "confirmed", "done",
   "हाँ", "हां", "ठीक", // hi
-  "అవును", "సరే", // te
+  // te: అవును/సరే are the "proper" words; సేవ్/యెస్ are phonetic
+  // transliterations of the English "save"/"yes" typed in Telugu script —
+  // confirmed live (reported with a screenshot): a borrower typed exactly
+  // "సేవ్ చేయండి." ("save cheyandi" — Telugu-English code-mixing, extremely
+  // common in real usage) and "యెస్." and neither matched anything here.
+  "అవును", "సరే", "సేవ్", "యెస్",
   "ஆம்", "சரி", // ta
   "ಹೌದು", "ಸರಿ", // kn
   "അതെ", "ശരി", // ml
@@ -76,6 +81,39 @@ export function isAffirmative(text: string): boolean {
 export function isNegative(text: string): boolean {
   const tokens = tokenize(text);
   return NO_WORDS.some((w) => containsPhrase(tokens, w));
+}
+
+/**
+ * Resolves a yes/no/unclear confirmation reply, same as isAffirmative/
+ * isNegative but with a real fallback for the case those two structurally
+ * can't cover: hand-curated word lists per language can never be complete
+ * against genuine Indian-language digital communication, which routinely
+ * code-mixes English words phonetically into the local script rather than
+ * using the "proper" native word — confirmed live in Telugu ("సేవ్
+ * చేయండి." for "save it", "యెస్." for "yes"), and there's no principled
+ * reason it wouldn't happen the same way in Hindi/Tamil/Kannada/Malayalam
+ * too, just not yet reported. Enumerating every plausible transliteration
+ * by hand across five scripts isn't reliable without a native speaker to
+ * verify each one — this app already has a real, working translation
+ * pipeline (lib/translate.ts, used for the bilingual dossier transcript),
+ * so instead: try the fast native-language/English match first (no network
+ * call, covers the common case instantly), and only if that's ambiguous,
+ * translate the reply to English and match again there — which is exactly
+ * as reliable as this codebase's English word list already is, for
+ * whatever the borrower actually wrote, not just what happened to be
+ * anticipated in a list.
+ */
+export async function resolveConfirmIntent(text: string, lang: LangCode): Promise<"yes" | "no" | "unclear"> {
+  if (isAffirmative(text)) return "yes";
+  if (isNegative(text)) return "no";
+  if (lang === "en") return "unclear";
+
+  const { translateText } = await import("@/lib/translate");
+  const result = await translateText(text, lang, "en");
+  if (!result.ok) return "unclear"; // translation failure is honestly "couldn't tell", not a guessed answer
+  if (isAffirmative(result.text)) return "yes";
+  if (isNegative(result.text)) return "no";
+  return "unclear";
 }
 
 // Indic digit blocks → Latin 0-9, so "౫౦౦౦౦" / "५०,०००" parse the same as "50000".

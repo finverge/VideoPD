@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { extractFieldValue, fieldLabel, fieldPrompt, isAffirmative, isNegative, matchFaq } from "@/lib/dialogManager";
+import { extractFieldValue, fieldLabel, fieldPrompt, resolveConfirmIntent, matchFaq } from "@/lib/dialogManager";
 import { t } from "@/lib/i18n";
 import type { LangCode, SegmentCode } from "@/types";
 
@@ -36,14 +36,20 @@ export async function POST(req: NextRequest) {
 
   // 1) Resolving a pending yes/no confirmation (FR-CHB-07 read-back)
   if (body.awaitingConfirmField && body.awaitingConfirmValue !== undefined && body.awaitingConfirmValue !== null) {
-    if (isAffirmative(userText)) {
+    // resolveConfirmIntent tries the fast native-language/English match
+    // first (no network call), and only falls back to translating the
+    // reply to English when that's ambiguous — covers code-mixed replies
+    // ("సేవ్ చేయండి." for "save it") a hand-curated word list per language
+    // can't realistically enumerate in full. See its own doc comment.
+    const intent = await resolveConfirmIntent(userText, language);
+    if (intent === "yes") {
       fieldUpdate = {
         key: body.awaitingConfirmField,
         value: body.awaitingConfirmValue,
         displayValue: body.awaitingConfirmDisplay ?? String(body.awaitingConfirmValue),
       };
       assistantText = "Saved. Let's continue.";
-    } else if (isNegative(userText)) {
+    } else if (intent === "no") {
       assistantText = `${t(language, "chatConfirmNo")}. ${fieldPrompt(body.awaitingConfirmField, language, segment)}`;
     } else {
       // Unclear — re-ask the yes/no question rather than guessing (FR-CHB-04 spirit).
