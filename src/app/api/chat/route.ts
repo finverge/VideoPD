@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { extractFieldValue, fieldLabel, fieldPrompt, resolveConfirmIntent, matchFaq } from "@/lib/dialogManager";
+import { fieldLabel, fieldPrompt, resolveConfirmIntent, resolveFieldValue, matchFaq } from "@/lib/dialogManager";
 import { t } from "@/lib/i18n";
 import type { LangCode, SegmentCode } from "@/types";
 
@@ -103,7 +103,7 @@ export async function POST(req: NextRequest) {
     if (faqAnswer) {
       assistantText = `${faqAnswer} ${fieldPrompt(body.pendingFieldKey, language, segment)}`;
     } else {
-      const result = extractFieldValue(body.pendingFieldKey, userText, language, segment);
+      const result = await resolveFieldValue(body.pendingFieldKey, userText, language, segment);
       if (result.ok && result.value !== null) {
         requiresConfirmation = { fieldKey: body.pendingFieldKey, value: result.value, displayValue: result.displayValue };
         assistantText = t(language, "chatConfirmField", {

@@ -84,6 +84,46 @@ export function isNegative(text: string): boolean {
 }
 
 /**
+ * Same translation-fallback technique as resolveConfirmIntent below, applied
+ * to the earlier step: extracting a value at all, not just confirming one.
+ * Reported live ("catching of the Gender and other words also still some
+ * confusion") after resolveConfirmIntent already fixed the yes/no
+ * confirmation step the same way — the identical structural gap existed one
+ * step earlier: extractFieldValue's choice-matching only ever tried the
+ * native-language/English label list, with no fallback for a genuine reply
+ * that doesn't happen to be in it. Only applies to choice-type fields (a
+ * translated number or free-text answer wouldn't parse any more reliably
+ * than the original — translation only helps when what's being matched is
+ * a small, known set of labels).
+ */
+export async function resolveFieldValue(
+  fieldKey: string,
+  raw: string,
+  lang: LangCode = "en",
+  segment?: SegmentCode
+): Promise<ExtractionResult> {
+  const direct = extractFieldValue(fieldKey, raw, lang, segment);
+  if (direct.ok || lang === "en") return direct;
+
+  const field = findFieldDef(fieldKey, segment);
+  if (field?.type !== "choice" || !field.choices) return direct;
+
+  const { translateText } = await import("@/lib/translate");
+  const translation = await translateText(raw, lang, "en");
+  if (!translation.ok) return direct;
+
+  const viaEnglish = extractFieldValue(fieldKey, translation.text, "en", segment);
+  if (!viaEnglish.ok) return direct;
+
+  // Re-derive the display value in the borrower's OWN language (not the
+  // English one extractFieldValue just matched against), so the confirm
+  // read-back stays consistent with the rest of the conversation.
+  const matchedChoice = field.choices.find((c) => c.value === viaEnglish.value);
+  if (!matchedChoice) return direct;
+  return { ok: true, value: viaEnglish.value, displayValue: t(lang, matchedChoice.labelKey) };
+}
+
+/**
  * Resolves a yes/no/unclear confirmation reply, same as isAffirmative/
  * isNegative but with a real fallback for the case those two structurally
  * can't cover: hand-curated word lists per language can never be complete
