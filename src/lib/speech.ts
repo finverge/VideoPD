@@ -45,6 +45,11 @@ export function useSpeech({ lang, onResult }: UseSpeechOptions) {
   const recognitionRef = useRef<SpeechRecognition | null>(null);
   const onResultRef = useRef(onResult);
   onResultRef.current = onResult;
+  // Chunks the recognizer has already settled on as final within the
+  // current listening session (see startListening's continuous: true below)
+  // — accumulated across any pauses, only ever joined and reported once the
+  // session actually ends, not per-chunk.
+  const finalChunksRef = useRef<string[]>([]);
 
   useEffect(() => {
     const SpeechRecognitionCtor =
@@ -65,34 +70,54 @@ export function useSpeech({ lang, onResult }: UseSpeechOptions) {
     }
 
     setError(null);
+    finalChunksRef.current = [];
     const recognition: SpeechRecognition = new SpeechRecognitionCtor();
     recognition.lang = SPEECH_LOCALE[lang];
     recognition.interimResults = true;
-    recognition.continuous = false;
+    // continuous: true — was false, which made the browser treat ANY brief
+    // pause mid-sentence as "end of speech" and tear the whole recognition
+    // session down, forcing a re-click of the mic to keep going. Reported
+    // live: "getting disconnected if there is a little pause between words,
+    // need to click on mic multiple times." continuous keeps the session
+    // alive across pauses — the recognizer still settles on individual
+    // final phrases as it goes (each pause can still produce its own
+    // isFinal chunk), so those are accumulated in finalChunksRef rather
+    // than reported one-by-one; the combined text only gets reported once
+    // via onend below, so one mic press still produces one complete answer,
+    // however many pauses were in it.
+    recognition.continuous = true;
     recognition.maxAlternatives = 1;
 
     recognition.onresult = (event: SpeechRecognitionEvent) => {
-      let finalText = "";
       let interim = "";
       for (let i = event.resultIndex; i < event.results.length; i++) {
         const res = event.results[i];
-        if (res.isFinal) finalText += res[0].transcript;
+        if (res.isFinal) finalChunksRef.current.push(res[0].transcript);
         else interim += res[0].transcript;
       }
-      setInterimTranscript(interim);
-      if (finalText) {
-        onResultRef.current?.(finalText.trim(), true);
-        setInterimTranscript("");
-      } else if (interim) {
-        onResultRef.current?.(interim, false);
-      }
+      const settledSoFar = finalChunksRef.current.join(" ");
+      const combined = [settledSoFar, interim].filter(Boolean).join(" ");
+      setInterimTranscript(combined);
+      if (combined) onResultRef.current?.(combined, false);
     };
 
     recognition.onerror = (event: any) => {
-      setError(describeSpeechError(event?.error ?? "unknown"));
-      setListening(false);
+      // "no-speech" fires routinely now that a session can sit through a
+      // real pause waiting for more speech, and "aborted" fires on every
+      // explicit stopListening() call below — neither is a real error to
+      // surface; onend always fires right after either one and finalizes
+      // whatever was actually captured.
+      if (event?.error !== "no-speech" && event?.error !== "aborted") {
+        setError(describeSpeechError(event?.error ?? "unknown"));
+      }
     };
-    recognition.onend = () => setListening(false);
+    recognition.onend = () => {
+      setListening(false);
+      const finalText = finalChunksRef.current.join(" ").trim();
+      finalChunksRef.current = [];
+      setInterimTranscript("");
+      if (finalText) onResultRef.current?.(finalText, true);
+    };
 
     recognitionRef.current = recognition;
     try {
