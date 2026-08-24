@@ -355,7 +355,16 @@ export default function ApplyPage() {
                     below the badge's corner at rest, at the cost of a short
                     scroll on shorter steps. */}
                 <div className="mt-[52vh] flex items-center justify-between border-t border-ink-100 pt-5 dark:border-ink-800 sm:mt-[48vh]">
-                  <Button variant="ghost" onClick={goBack} disabled={step === 0} icon={<ArrowLeft className="h-4 w-4" />}>
+                  {/* Neither button showed any progress state while persist()
+                      was actually in flight — just a small, easy-to-miss
+                      "Saving…" text elsewhere on the page, and nothing
+                      stopped a double-click from firing goNext()/goBack()
+                      twice concurrently. Reported live as part of a broader
+                      "no progress bar shown when something is in progress"
+                      sweep across every page — this was the one real gap
+                      found; every other page's async actions already used
+                      the shared Button component's own loading spinner. */}
+                  <Button variant="ghost" onClick={goBack} disabled={step === 0 || saving} loading={saving} icon={<ArrowLeft className="h-4 w-4" />}>
                     {t(lang, "back")}
                   </Button>
                   {steps[step] === "stepReview" ? (
@@ -371,8 +380,9 @@ export default function ApplyPage() {
                   ) : (
                     <Button
                       size="lg"
+                      loading={saving}
                       onClick={goNext}
-                      disabled={steps[step] === "stepUpload" && !evidenceComplete}
+                      disabled={saving || (steps[step] === "stepUpload" && !evidenceComplete)}
                       icon={<ArrowRight className="h-4 w-4" />}
                     >
                       {t(lang, "next")}
