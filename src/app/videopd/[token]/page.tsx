@@ -6,7 +6,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { AlertTriangle, Camera, CheckCircle2, FileUp, Loader2, Mic, MicOff, ShieldCheck, Upload } from "lucide-react";
 import { CameraCapture, type LivenessCaptureResult } from "@/components/CameraCapture";
 import { LiveCallRoom } from "@/components/LiveCallRoom";
-import { descriptorFromImageUrl, compareFaceDescriptors, isSamePerson } from "@/lib/faceMatch";
+import { descriptorFromIdProofUrl, compareFaceDescriptors, isSamePerson } from "@/lib/faceMatch";
 import { LakshyaLogo } from "@/components/BrandHeader";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { Button } from "@/components/ui/Button";
@@ -299,9 +299,16 @@ async function submitLivenessResult(token: string, evidenceId: string, result: L
   if (!result.descriptor) {
     faceMatch = { attempted: false, distance: null, matched: null, skippedReason: "No confident face detected during the liveness recording — face-match skipped." };
   } else {
-    const idDescriptor = await descriptorFromImageUrl(`/api/videopd/${token}/id-proof`);
+    const idDescriptor = await descriptorFromIdProofUrl(`/api/videopd/${token}/id-proof`);
     if (!idDescriptor) {
-      faceMatch = { attempted: false, distance: null, matched: null, skippedReason: "ID proof photo unavailable or no face detected in it — face-match skipped." };
+      // Two genuinely different reasons collapse to the same skip, both
+      // honest: no ID proof is on file at all, or one is but no confident
+      // face was found in it (image or PDF, after rendering) — worded to
+      // not read as "there's no ID proof" when there visibly is one, which
+      // is exactly what caused real confusion (reported live) when the ID
+      // proof was a PDF this same check couldn't yet render, before
+      // descriptorFromIdProofUrl added PDF support.
+      faceMatch = { attempted: false, distance: null, matched: null, skippedReason: "Could not find a clear, matchable face in the uploaded ID proof — face-match skipped." };
     } else {
       const distance = compareFaceDescriptors(idDescriptor, result.descriptor);
       faceMatch = { attempted: true, distance, matched: isSamePerson(distance) };
