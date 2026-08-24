@@ -41,6 +41,33 @@ async function fetchIceServers(): Promise<RTCIceServer[]> {
   }
 }
 
+// getUserMedia's error .name distinguishes real, different causes that all
+// used to collapse into one vague "Couldn't access camera/microphone." —
+// most importantly NotReadableError ("device already in use"), which is
+// exactly what happens testing both the underwriter and borrower sides in
+// two tabs of the same browser on one machine: most devices have exactly
+// one camera, and it can't stream to two getUserMedia calls at once, so
+// the second tab to join genuinely can't get a camera, not a bug in the
+// call logic itself. Reported live as "video recording is not happening"
+// when testing that exact two-tabs-one-machine setup.
+function describeGetUserMediaError(name: string | undefined): string {
+  switch (name) {
+    case "NotAllowedError":
+    case "PermissionDeniedError":
+      return "Camera/microphone access was denied.";
+    case "NotReadableError":
+    case "TrackStartError":
+      return "Your camera or microphone is already in use by another tab or app — close whatever else has it open (this is the most common cause when testing both sides of a call in two tabs on the same computer, since most devices only have one camera).";
+    case "NotFoundError":
+    case "DevicesNotFoundError":
+      return "No camera or microphone was found on this device.";
+    case "OverconstrainedError":
+      return "This device's camera/microphone doesn't support what the call needs.";
+    default:
+      return "Couldn't access camera/microphone.";
+  }
+}
+
 export type ConnectionQuality = "good" | "weak" | "unknown";
 
 /** The live liveness/attention signal a peer broadcasts about themselves
@@ -398,7 +425,7 @@ export function useCallRoom({
       stream = gotStream;
     } catch (e: any) {
       joiningRef.current = false;
-      setError(e?.name === "NotAllowedError" ? "Camera/microphone access was denied." : "Couldn't access camera/microphone.");
+      setError(describeGetUserMediaError(e?.name));
       return;
     }
     localStreamRef.current = stream;
