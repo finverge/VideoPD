@@ -198,6 +198,16 @@ model UploadedEvidence {
   faceMatchResult        Boolean? // null = not attempted (see authenticityNotes for why)
 
   createdAt     DateTime @default(now())
+
+  // One evidence item per type per application — the upload UI already only
+  // ever tracks a single "existing" row per type per slot (apply/[id]/page.tsx's
+  // EVIDENCE_CONFIG + UploadDropzone), so a re-upload was always meant to
+  // replace, not add. Nothing enforced that at the DB level, so a re-upload
+  // silently created an extra row instead (reported live — 3 ID_PROOF rows
+  // on one case). Same pattern as VideoPdAnswer's own
+  // @@unique([sessionId, questionKey]) for exactly the same "re-answering
+  // upserts in place" reason.
+  @@unique([applicationId, type])
 }
 
 // FSD Section 13 — "Chatbot Transcript" (one row per turn)
