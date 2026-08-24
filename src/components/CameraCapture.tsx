@@ -7,6 +7,7 @@ import { cn } from "@/lib/utils";
 import { useFocusTrap } from "@/lib/useFocusTrap";
 import { loadFaceModels, faceapi } from "@/lib/faceModels";
 import { averageEAR, estimateYawOffset, BlinkTracker, AttentionTracker, LOOKED_AWAY_YAW_THRESHOLD } from "@/lib/liveness";
+import { describeGetUserMediaError } from "@/lib/mediaErrors";
 
 const AWAY_STREAK_TO_NUDGE = 3; // ~1.2s of consecutive looked-away ticks before showing the nudge — avoids flicker on a single noisy frame
 
@@ -122,11 +123,14 @@ export function CameraCapture({
         }
         setReady(true);
       } catch (e: any) {
-        setError(
-          e?.name === "NotAllowedError"
-            ? "Camera access was denied. Please allow camera permission and try again."
-            : "Couldn't access a camera on this device."
-        );
+        // Was just e?.name === "NotAllowedError" vs. one generic fallback —
+        // real cause reported live: opening the live VideoPD call (which
+        // holds the camera via its own getUserMedia in useCallRoom.ts) and
+        // then switching back to this guided-flow recording without leaving
+        // that call first. Most devices have exactly one camera, so the
+        // second getUserMedia call genuinely can't get it — a real hardware
+        // constraint, but the old message gave no hint that was the cause.
+        setError(describeGetUserMediaError(e?.name));
       }
     })();
     return () => {

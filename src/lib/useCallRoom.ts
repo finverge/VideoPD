@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { averageEAR, estimateYawOffset, BlinkTracker, LOOKED_AWAY_YAW_THRESHOLD } from "@/lib/liveness";
 import { SPEECH_LOCALE } from "@/lib/i18n";
+import { describeGetUserMediaError } from "@/lib/mediaErrors";
 import type { LangCode } from "@/types";
 // faceModels.ts pulls in face-api.js/TensorFlow.js — a large bundle. Loaded
 // dynamically inside startLivenessAnalysis below, only on the code path
@@ -50,24 +51,6 @@ async function fetchIceServers(): Promise<RTCIceServer[]> {
 // the second tab to join genuinely can't get a camera, not a bug in the
 // call logic itself. Reported live as "video recording is not happening"
 // when testing that exact two-tabs-one-machine setup.
-function describeGetUserMediaError(name: string | undefined): string {
-  switch (name) {
-    case "NotAllowedError":
-    case "PermissionDeniedError":
-      return "Camera/microphone access was denied.";
-    case "NotReadableError":
-    case "TrackStartError":
-      return "Your camera or microphone is already in use by another tab or app — close whatever else has it open (this is the most common cause when testing both sides of a call in two tabs on the same computer, since most devices only have one camera).";
-    case "NotFoundError":
-    case "DevicesNotFoundError":
-      return "No camera or microphone was found on this device.";
-    case "OverconstrainedError":
-      return "This device's camera/microphone doesn't support what the call needs.";
-    default:
-      return "Couldn't access camera/microphone.";
-  }
-}
-
 export type ConnectionQuality = "good" | "weak" | "unknown";
 
 /** The live liveness/attention signal a peer broadcasts about themselves
