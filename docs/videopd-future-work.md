@@ -146,16 +146,22 @@ spoofing the signals it reads. The answer-similarity check is explicitly
 lexical, not NLU — it catches reused wording, not two different phrasings of
 the same idea (that's item 8's still-missing gap, unchanged).
 
-## 6. Scanned-PDF OCR fallback
+## 6. Scanned-PDF OCR fallback — stated blocker no longer accurate; not yet built
 
 The bank-statement pipeline (`src/lib/bankStatement.ts`) tries a PDF's native
 text layer first, then falls back to ICR/OCR for image files. A **scanned
 PDF with no text layer** currently gets flagged `NEEDS_REVIEW` rather than
-OCR'd, because that requires rasterizing PDF pages to images first (a native
-renderer, e.g. `pdfjs-dist` + `canvas`) — deferred given this environment's
-history of native-binary install issues with canvas-family packages. A
-borrower can work around this today by photographing the statement instead
-(routes to the OCR path directly).
+OCR'd, because that requires rasterizing PDF pages to images first. This
+entry used to say that needed a native renderer this environment couldn't
+reliably install — **no longer true**: `pdfjs-dist` is now a real, proven
+dependency in this exact codebase (added for the PDF face-match work,
+`src/lib/faceMatch.ts` — genuinely renders a PDF page to a canvas, verified
+against real documents). The same technique could feed a scanned bank
+statement's rendered page into the existing Tesseract OCR path instead of
+flagging `NEEDS_REVIEW` outright — a real, now-unblocked extension of
+existing code, just not yet built. A borrower can still work around this
+today by photographing the statement instead (routes to the OCR path
+directly).
 
 ## 7. Real bank-statement format coverage
 
@@ -169,17 +175,33 @@ partially or trigger `NEEDS_REVIEW`; there's no silent wrong-answer path
 (low-confidence extraction always routes to manual review) but coverage is
 narrower than a commercial analyzer.
 
-## 8. Full Live Consistency Engine (BR-42)
+## 8. Full Live Consistency Engine (BR-42) — the BRD's own worked example is done; broader NLU still isn't
 
-**What's built:** one real, honest cross-check — declared monthly income
-(from the original application) vs. the income pattern found in the bank
-statement, flagged if they differ by >40%.
+**What's built:** two real, honest cross-checks, both numeric — matching
+numbers reliably is straightforward, so both were built; extracting
+comparable claims from open-ended free text still needs real NLU (see what's
+missing below, unchanged there).
 
-**What's missing:** cross-checking the borrower's free-text VideoPD Q&A
-answers against application data more broadly (the BRD's own example is
-"stated income vs. declared household cash flow" mentioned in conversation
-during this build too). Matching two numbers reliably is straightforward;
-extracting comparable claims from free-text answers needs real NLU, not
+- Declared monthly income (from the original application) vs. the income
+  pattern found in the bank statement, flagged if they differ by >40%.
+- Stated income *spoken during the VideoPD Q&A itself* vs. the income
+  declared on the application (`isIncomeQuestion`/`extractStatedIncomeFromAnswer`/
+  `checkIncomeConsistency` in `mockChecks.ts`, wired into
+  `api/videopd/[token]/complete/route.ts`) — this is the BRD's own literal
+  worked example ("stated income vs. declared household cash flow"). Gated
+  by the question's `key` containing "income" (language-independent, since
+  the question's displayed *text* is in whatever language the borrower saw
+  it in) — none of the 9 originally-seeded questions ask about income
+  directly, so one was added per segment through the same real
+  translate-and-approve pipeline the admin question UI uses, not
+  hand-typed translations.
+
+**What's still missing:** cross-checking *other* free-text VideoPD Q&A
+content against application data beyond the income example — e.g., a
+farmer's described crop/land details against `segmentFieldsJson`, or a
+business owner's stated operations against `businessType`. That's a
+genuinely different, harder problem than the two numeric checks above:
+extracting comparable claims from open-ended free text needs real NLU, not
 attempted here.
 
 ## 9. Configurable scoring model calibrated to Lakshya's credit parameters (BR-43) — real generic defaults built, calibration still pending
