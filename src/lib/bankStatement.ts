@@ -1,4 +1,6 @@
 import path from "path";
+import os from "os";
+import { mkdtemp, rm } from "fs/promises";
 import { execFile } from "child_process";
 import { promisify } from "util";
 
@@ -10,11 +12,14 @@ const execFileAsync = promisify(execFile);
  * or ICR/OCR — never a paid statement-analyzer service like Perfios.
  *
  * Two-stage pipeline:
- *   1. Extraction (extractText) — PDF text layer if present, else OCR for
- *      images. A scanned/image-only PDF has no text layer and this prototype
- *      does not rasterize PDF pages for OCR fallback (that needs a native
- *      PDF-to-image renderer) — it's flagged NEEDS_REVIEW instead of guessing.
- *      See docs/videopd-future-work.md.
+ *   1. Extraction (extractText) — PDF text layer if present; else OCR
+ *      (Tesseract.js) directly for an uploaded image; else, for a scanned/
+ *      image-only PDF (no usable text layer), rasterizes each page to a PNG
+ *      (scripts/rasterize-pdf.py, PyMuPDF — a real, pip-installable-without-
+ *      a-native-compiler renderer, confirmed present in this environment)
+ *      and OCRs each rendered page. This used to be flagged NEEDS_REVIEW
+ *      outright with no fallback attempted — see docs/videopd-future-work.md
+ *      item 6 for why that was the case and why it no longer is.
  *   2. Structuring + eligibility (parseTransactions / computeMetrics /
  *      computeEligibility) — rule-based, transparent, ADVISORY ONLY. Per BRD
  *      Section 7.2 ("Automated non-underwriter-reviewed credit decisioning"
@@ -56,10 +61,44 @@ export interface PdfInfo {
   ModDate?: string;
 }
 
+const SCANNED_PDF_MAX_PAGES = 15;
+// A rendered page beyond this many raw OCR characters is "found real text on
+// this page" — same 40-char floor already used for the plain-image path,
+// applied per-page instead of once, so a mostly-blank first page doesn't
+// mask real text further in.
+const MIN_TEXT_LENGTH = 40;
+
+async function ocrScannedPdf(absoluteFilePath: string): Promise<string | null> {
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "scanned-pdf-"));
+  try {
+    const scriptPath = path.join(process.cwd(), "scripts", "rasterize-pdf.py");
+    const { stdout } = await execFileAsync(
+      "python",
+      [scriptPath, absoluteFilePath, tmpDir, String(SCANNED_PDF_MAX_PAGES)],
+      { maxBuffer: 10 * 1024 * 1024 },
+    );
+    const result = JSON.parse(stdout) as { pageCount: number; renderedPages: number; files: string[] };
+    if (result.files.length === 0) return null;
+
+    const Tesseract = await import("tesseract.js");
+    const pageTexts: string[] = [];
+    for (const pngPath of result.files) {
+      const { data } = await Tesseract.recognize(pngPath, "eng");
+      pageTexts.push(data.text.trim());
+    }
+    return pageTexts.join("\n\n").trim();
+  } catch (e) {
+    console.error("[bankStatement.ocrScannedPdf] rasterize/OCR failed:", e);
+    return null;
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 export async function extractText(
   absoluteFilePath: string,
   mimeType: string
-): Promise<{ text: string; status: "EXTRACTED" | "NEEDS_REVIEW" | "FAILED"; pdfInfo: PdfInfo | null; revisionCount: number | null }> {
+): Promise<{ text: string; status: "EXTRACTED" | "NEEDS_REVIEW" | "FAILED"; pdfInfo: PdfInfo | null; revisionCount: number | null; viaOcr: boolean }> {
   try {
     if (mimeType === "application/pdf") {
       // Runs as a separate `node` child process — see scripts/extract-pdf.js
@@ -73,13 +112,21 @@ export async function extractText(
       const { stdout } = await execFileAsync("node", [scriptPath, absoluteFilePath], { maxBuffer: 20 * 1024 * 1024 });
       const result = JSON.parse(stdout) as { text: string; info: PdfInfo | null; revisionCount: number };
       const text = result.text.trim();
-      if (text.length < 40) {
-        // No usable text layer — likely a scanned/image-only PDF. This
-        // prototype doesn't rasterize PDF pages for an OCR fallback (see
-        // module docstring) — flag rather than silently return near-nothing.
-        return { text, status: "NEEDS_REVIEW", pdfInfo: result.info, revisionCount: result.revisionCount };
+      if (text.length >= MIN_TEXT_LENGTH) {
+        return { text, status: "EXTRACTED", pdfInfo: result.info, revisionCount: result.revisionCount, viaOcr: false };
       }
-      return { text, status: "EXTRACTED", pdfInfo: result.info, revisionCount: result.revisionCount };
+
+      // No usable native text layer — likely a scanned/image-only PDF.
+      // Rasterize each page and OCR it (see ocrScannedPdf above) rather than
+      // flagging NEEDS_REVIEW outright.
+      const ocrText = await ocrScannedPdf(absoluteFilePath);
+      if (ocrText && ocrText.length >= MIN_TEXT_LENGTH) {
+        return { text: ocrText, status: "EXTRACTED", pdfInfo: result.info, revisionCount: result.revisionCount, viaOcr: true };
+      }
+      // Rasterize/OCR itself failed, or still came back too short (a
+      // genuinely blank/unreadable scan) — flag for manual review, same as
+      // before this fallback existed, rather than guess at near-nothing.
+      return { text: ocrText ?? text, status: "NEEDS_REVIEW", pdfInfo: result.info, revisionCount: result.revisionCount, viaOcr: !!ocrText };
     }
 
     if (mimeType.startsWith("image/")) {
@@ -88,14 +135,14 @@ export async function extractText(
       const text = data.text.trim();
       // No PDF structure on a raw image — the metadata/revision checks
       // below simply don't apply here, not "checked and clean".
-      if (text.length < 40) return { text, status: "NEEDS_REVIEW", pdfInfo: null, revisionCount: null };
-      return { text, status: "EXTRACTED", pdfInfo: null, revisionCount: null };
+      if (text.length < MIN_TEXT_LENGTH) return { text, status: "NEEDS_REVIEW", pdfInfo: null, revisionCount: null, viaOcr: true };
+      return { text, status: "EXTRACTED", pdfInfo: null, revisionCount: null, viaOcr: true };
     }
 
-    return { text: "", status: "FAILED", pdfInfo: null, revisionCount: null };
+    return { text: "", status: "FAILED", pdfInfo: null, revisionCount: null, viaOcr: false };
   } catch (e) {
     console.error("[bankStatement.extractText] extraction failed:", e);
-    return { text: "", status: "FAILED", pdfInfo: null, revisionCount: null };
+    return { text: "", status: "FAILED", pdfInfo: null, revisionCount: null, viaOcr: false };
   }
 }
 

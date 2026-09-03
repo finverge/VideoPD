@@ -3,7 +3,7 @@
 import { Fragment } from "react";
 import { Input, Select, Textarea } from "@/components/ui/Input";
 import { t } from "@/lib/i18n";
-import type { FieldDef } from "@/lib/formSchema";
+import { fieldValidationError, type FieldDef } from "@/lib/formSchema";
 import type { LangCode } from "@/types";
 
 export function StepFields({
@@ -89,6 +89,9 @@ export function StepFields({
                 disabled={disabled}
                 placeholder={f.placeholder}
                 hint={f.hint}
+                min={f.min}
+                max={f.max}
+                error={fieldValidationError(f, values[f.key], values) ?? undefined}
                 value={(values[f.key] as string | number) ?? ""}
                 onChange={(e) => onChange(f.key, f.type === "number" ? Number(e.target.value) : e.target.value)}
                 className={disabled ? "cursor-not-allowed opacity-60" : ""}

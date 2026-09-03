@@ -23,6 +23,9 @@ import {
   XCircle,
   Undo2,
   AlertTriangle,
+  Mic,
+  Users,
+  Boxes,
 } from "lucide-react";
 import { Card } from "@/components/ui/Card";
 import { LiveCallRoom } from "@/components/LiveCallRoom";
@@ -31,7 +34,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Textarea } from "@/components/ui/Input";
 import { getStoredStaff, clearStoredStaff, type StaffMember } from "@/lib/staffAuth";
-import { formatINR } from "@/lib/utils";
+import { formatINR, cn } from "@/lib/utils";
 import { SEGMENT_FIELDS } from "@/lib/formSchema";
 import { draftUnderwriterRecommendation } from "@/lib/underwriterAgent";
 import { Sparkles } from "lucide-react";
@@ -153,15 +156,64 @@ interface CaseDetailData {
     borrower: { mobile: string; language: string };
     evidence: EvidenceRow[];
     transcripts: ChatTurnRow[];
+    voiceBiometricCheck: VoiceBiometricCheckRow | null;
   };
+}
+
+interface VoiceBiometricCheckRow {
+  consistencyStatus: string;
+  consistencySimilarity: number | null;
+  consistencyMethod: string | null;
+  consistencyNotes: string | null;
+  livenessMultiSpeakerStatus: string;
+  livenessSpeakerCount: number | null;
+  businessMultiSpeakerStatus: string;
+  businessSpeakerCount: number | null;
+  liveCallConsistencyStatus: string;
+  liveCallConsistencySimilarity: number | null;
+  liveCallConsistencyMethod: string | null;
+  liveCallConsistencyNotes: string | null;
+  liveCallMultiSpeakerStatus: string;
+  liveCallSpeakerCount: number | null;
+  livenessDeepfakeStatus: string;
+  livenessDeepfakeRatio: number | null;
+  businessDeepfakeStatus: string;
+  businessDeepfakeRatio: number | null;
+  deepfakeModel: string | null;
+  livenessLipSyncStatus: string;
+  livenessLipSyncScore: number | null;
+  businessLipSyncStatus: string;
+  businessLipSyncScore: number | null;
+  lipSyncModel: string | null;
+  assetDetectionStatus: string;
+  assetDetectionChecklistJson: string | null;
+  assetDetectionModel: string | null;
+  assetDetectionNotes: string | null;
+  customAssetDetectionStatus: string;
+  customAssetDetectionChecklistJson: string | null;
+  customAssetDetectionModel: string | null;
+  customAssetDetectionNotes: string | null;
+  assetChecklistManualTicksJson: string | null;
+  assetChecklistScore: number | null;
+  checkedAt: string | null;
+}
+
+interface AssetDetectionChecklistItem {
+  label: string;
+  count: number;
+  confidence: number;
+  thumbnail: string | null;
 }
 
 const RISK_TONE: Record<string, "neutral" | "success" | "warning" | "danger"> = {
   none: "success", low: "neutral", medium: "warning", high: "danger",
 };
+// Same gap fixed in the queue list's own STATUS_TONE (staff/queue/page.tsx) —
+// VIDEOPD_SCHEDULED/VIDEOPD_COMPLETE fell through to a plain grey badge here too.
 const STATUS_TONE: Record<string, "neutral" | "success" | "warning" | "danger" | "info"> = {
   NEW: "info", UNDER_REVIEW: "warning", AWAITING_CHECKER_REVIEW: "warning",
-  SENT_BACK: "danger", APPROVED: "success", REJECTED: "danger",
+  SENT_BACK: "danger", VIDEOPD_SCHEDULED: "info", VIDEOPD_COMPLETE: "warning",
+  APPROVED: "success", REJECTED: "danger",
 };
 
 export default function CaseDetailPage() {
@@ -174,6 +226,11 @@ export default function CaseDetailPage() {
   const [busy, setBusy] = useState(false);
   const [sentLink, setSentLink] = useState<string | null>(null);
   const [linkCopied, setLinkCopied] = useState(false);
+  // Needed here (not just risk-parameters) so the Action panel below knows
+  // whether it should wait on deepfake/lip-sync specifically — those are
+  // the two sub-checks an Approver can turn off, and this page shouldn't
+  // block a decision on a check that's deliberately disabled.
+  const [featureSettings, setFeatureSettings] = useState<{ deepfakeCheckEnabled: boolean; lipSyncCheckEnabled: boolean } | null>(null);
 
   const load = useCallback(async () => {
     const res = await fetch(`/api/staff/case/${params.id}`);
@@ -181,6 +238,10 @@ export default function CaseDetailPage() {
     if (json.lead) setData(json.lead);
     setLoading(false);
   }, [params.id]);
+
+  useEffect(() => {
+    fetch("/api/staff/feature-settings").then((r) => r.json()).then((json) => setFeatureSettings(json.settings)).catch(() => {});
+  }, []);
 
   useEffect(() => {
     const s = getStoredStaff();
@@ -191,6 +252,35 @@ export default function CaseDetailPage() {
   useEffect(() => {
     if (staff) load();
   }, [staff, load]);
+
+  // Bank statement analysis now runs in the background after upload (see
+  // api/videopd/[token]/bank-statement/route.ts) — the row this page just
+  // loaded can still be PENDING even though the borrower's upload step
+  // already finished. Poll while it is, so the real result (or a genuine
+  // FAILED) appears on its own rather than requiring a manual refresh.
+  // Stops itself the moment the latest statement is no longer PENDING.
+  const latestStatementStatus = data?.videoPdSession?.bankStatements?.[0]?.status;
+  useEffect(() => {
+    if (latestStatementStatus !== "PENDING") return;
+    const interval = setInterval(load, 3000);
+    return () => clearInterval(interval);
+  }, [latestStatementStatus, load]);
+
+  // Voice-biometrics sub-checks now run automatically in the background
+  // (see api/upload/route.ts's calls into runVoiceCheck) rather than
+  // waiting for a manual click — but that means a decision made in the
+  // few seconds right after a call ends or the guided-flow completes could
+  // race ahead of results that are still landing. computeVoiceChecksPending
+  // is the single source of truth ActionPanel uses to decide whether to
+  // hold the decision buttons; this effect just polls while it's true, on
+  // the same pattern as the bank-statement polling above, so the block
+  // clears itself the moment results land — never a manual-refresh dead end.
+  const voiceChecksPending = data ? computeVoiceChecksPending(data, featureSettings) : false;
+  useEffect(() => {
+    if (!voiceChecksPending) return;
+    const interval = setInterval(load, 4000);
+    return () => clearInterval(interval);
+  }, [voiceChecksPending, load]);
 
   async function act(url: string, body: Record<string, unknown>) {
     setActionError(null);
@@ -357,6 +447,15 @@ export default function CaseDetailPage() {
           to "is the person on camera the person on the ID proof". */}
       <IdentityVerificationCard evidence={app.evidence} />
 
+      {/* Voice biometrics — staff-triggered, calls a separate Python
+          microservice (voice-service/README.md) doing real SpeechBrain/
+          Resemblyzer speaker-embedding comparison + a window-cluster
+          multi-speaker scan over the two guided-flow recordings. Not run
+          automatically: the service may not be running in every
+          environment, and its thresholds are uncalibrated against real
+          borrower audio (advisory only — see the card's own note). */}
+      <VoiceBiometricsCard caseId={data.id} applicationId={app.id} segment={app.segment} evidence={app.evidence} check={app.voiceBiometricCheck} onChecked={load} />
+
       {/* Bank statement — found live: this had no viewer at all (the raw
           file was uploaded and genuinely parsed, but nothing surfaced it
           except a snapshot buried in the dossier JSON, which only exists
@@ -440,6 +539,7 @@ export default function CaseDetailPage() {
           data={data}
           staff={staff}
           busy={busy}
+          voiceChecksPending={voiceChecksPending}
           onClaim={() => act(`/api/staff/case/${data.id}/claim`, { staffName: staff.name })}
           onUnderwriterDecision={(recommendation, notes) =>
             act(`/api/staff/case/${data.id}/underwriter-decision`, { staffName: staff.name, recommendation, notes })
@@ -451,6 +551,44 @@ export default function CaseDetailPage() {
       </Card>
     </main>
   );
+}
+
+// Whether a decision (recommend / approve / reject) should wait on a
+// voice-biometrics sub-check that's still running in the background.
+// "Pending" here means "evidence exists that this check runs against, and
+// the DB row doesn't yet show a non-PENDING result for it" — it does NOT
+// distinguish "still actively running" from "voice-service was
+// unreachable and the auto-trigger silently never wrote anything" (that
+// second case has no DB trace to tell them apart in this prototype). By
+// design this never blocks forever without a way out: ActionPanel always
+// offers an explicit "proceed without waiting" override alongside the
+// block, so a genuinely-down voice-service (this app's core resilience
+// principle — everything else keeps working without it) can't strand a
+// case. Deepfake/lip-sync are only required when their admin toggle
+// (src/lib/featureSettings.ts) is actually on. Asset detection is
+// deliberately NOT included here even when its toggle is on — it's a
+// checklist for the underwriter to read, not a risk signal, so there's
+// nothing to "wait for" before a decision is safe to make.
+function computeVoiceChecksPending(
+  data: CaseDetailData,
+  featureSettings: { deepfakeCheckEnabled: boolean; lipSyncCheckEnabled: boolean } | null,
+): boolean {
+  const evidence = data.application.evidence;
+  const hasLiveness = evidence.some((e) => e.type === "VIDEOPD_LIVENESS" && e.mimeType.startsWith("video/"));
+  const hasBusiness = evidence.some((e) => e.type === "VIDEOPD_BUSINESS_VERIFICATION" && e.mimeType.startsWith("video/"));
+  const hasGuidedFlow = hasLiveness && hasBusiness;
+  const hasLiveCall = evidence.some((e) => e.type === "LIVE_CALL_RECORDING");
+  const vc = data.application.voiceBiometricCheck;
+
+  if (hasGuidedFlow) {
+    if (!vc || vc.consistencyStatus === "PENDING") return true;
+    if (featureSettings?.deepfakeCheckEnabled && vc.livenessDeepfakeStatus === "PENDING") return true;
+    if (featureSettings?.lipSyncCheckEnabled && vc.livenessLipSyncStatus === "PENDING") return true;
+  }
+  if (hasLiveCall) {
+    if (!vc || (vc.liveCallConsistencyStatus === "PENDING" && vc.liveCallMultiSpeakerStatus === "PENDING")) return true;
+  }
+  return false;
 }
 
 // Assembles the real, already-computed signals this case has into the
@@ -481,30 +619,83 @@ function buildDraftInput(data: CaseDetailData) {
   };
 }
 
+// Wraps the actual decision buttons — holds them back while
+// voice-biometrics sub-checks are still running (see
+// computeVoiceChecksPending), with a deliberate, secondary-styled escape
+// hatch rather than a silent bypass, so a genuinely unreachable
+// voice-service (this app's core resilience principle: everything else
+// keeps working without it) can never permanently strand a case.
+function VoiceCheckGate({ pending, overridden, onOverride, children }: { pending: boolean; overridden: boolean; onOverride: () => void; children: React.ReactNode }) {
+  if (!pending || overridden) return <>{children}</>;
+  return (
+    <div className="space-y-2 rounded-xl border border-amber-200 bg-amber-50 p-3 dark:border-amber-900/50 dark:bg-amber-950/20">
+      <p className="flex items-center gap-1.5 text-xs font-medium text-amber-700 dark:text-amber-400">
+        <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" /> Voice-biometrics checks are still running in the background — this page refreshes on its own once they land, no action needed.
+      </p>
+      <p className="text-[11px] leading-snug text-amber-700/80 dark:text-amber-400/70">
+        Taking longer than a minute or two usually means the voice-biometrics service isn't running — try &ldquo;Re-run voice check&rdquo; above once it&apos;s back, or{" "}
+        <button type="button" onClick={onOverride} className="underline underline-offset-2 hover:text-amber-900 dark:hover:text-amber-300">
+          proceed without waiting
+        </button>.
+      </p>
+    </div>
+  );
+}
+
 function ActionPanel({
-  data, staff, busy, onClaim, onUnderwriterDecision, onApproverDecision,
+  data, staff, busy, voiceChecksPending, onClaim, onUnderwriterDecision, onApproverDecision,
 }: {
   data: CaseDetailData;
   staff: StaffMember;
   busy: boolean;
+  voiceChecksPending: boolean;
   onClaim: () => void;
   onUnderwriterDecision: (recommendation: "APPROVE" | "REJECT", notes: string) => void;
   onApproverDecision: (decision: "APPROVED" | "REJECTED" | "SENT_BACK", notes: string) => void;
 }) {
   const [notes, setNotes] = useState("");
+  // Reported live: clicking "Draft recommendation" used to overwrite this
+  // same box with the AI text, so typing a comment meant editing (or
+  // accidentally clobbering) the draft rather than adding to it — there
+  // was no way to tell "what the rule engine said" apart from "what the
+  // underwriter actually thinks" once both had been typed into one field.
+  // Kept as its own state now: read-only once drafted, never mixed into
+  // `notes`, which stays exclusively the underwriter's own words.
+  const [aiReasoning, setAiReasoning] = useState<string | null>(null);
   // Purely a UI hint (which button to highlight) — never disables or
   // pre-selects anything. The underwriter can click either button
-  // regardless of what this says, and can freely edit the notes text
-  // before submitting either way.
+  // regardless of what this says.
   const [draftSuggestion, setDraftSuggestion] = useState<"APPROVE" | "REJECT" | null>(null);
+  // Deliberately separate from draftSuggestion — this only ever flips via
+  // the explicit "proceed without waiting" click in VoiceCheckGate, never
+  // automatically, and every decision made while it's true gets an
+  // unremovable marker prepended to its notes (see the two onClick
+  // handlers below) — a real audit trail of which decisions were made
+  // without a completed voice-biometrics read, same reasoning as the
+  // "[AI-drafted]" marker below.
+  const [voiceCheckOverridden, setVoiceCheckOverridden] = useState(false);
+  // What actually gets persisted: the AI draft (if one was ever generated
+  // for this round, verbatim, never editable) followed by the
+  // underwriter's own notes as a clearly separate section — both survive
+  // into the real audit trail (LeadDecision), not just whichever one
+  // happened to still be in the box at submit time.
+  function combinedNotes() {
+    const parts: string[] = [];
+    if (aiReasoning) parts.push(`[AI-drafted — reviewed before submission]\n${aiReasoning}`);
+    if (notes.trim()) parts.push(notes.trim());
+    return parts.join("\n\n");
+  }
+  function notesWithOverrideMarker() {
+    const base = combinedNotes();
+    return voiceCheckOverridden && voiceChecksPending
+      ? `[Decided without waiting for voice-biometrics checks to finish]\n${base}`
+      : base;
+  }
 
   function draftRecommendation() {
     const { recommendation, reasoning } = draftUnderwriterRecommendation(buildDraftInput(data));
     setDraftSuggestion(recommendation);
-    // Marker stays in the persisted notes permanently — a real audit trail
-    // of what originated as a draft vs. what the underwriter wrote
-    // themselves, even after they edit or override it.
-    setNotes(`[AI-drafted — reviewed before submission]\n${reasoning}`);
+    setAiReasoning(reasoning);
   }
 
   if (data.status === "APPROVED" || data.status === "REJECTED") {
@@ -558,18 +749,35 @@ function ActionPanel({
           )}
         </div>
         {/* Rule-based synthesis of the signals already on this page — not a
-            language model, and never submitted automatically. It only ever
-            pre-fills the notes below, which stay fully editable; the
-            underwriter still has to read this and explicitly click one of
-            the two buttons themselves. Nothing here writes to the database. */}
+            language model, and never submitted automatically. Read-only
+            once drafted (see aiReasoning's own comment for why this used
+            to be an editable box the underwriter's own notes could
+            accidentally overwrite) — the underwriter reads it, then adds
+            their own view in the separate box below; nothing here writes
+            to the database on its own. */}
         <p className="text-[11px] leading-snug text-ink-400">
-          "Draft recommendation" synthesizes the checks already shown on this page (risk flags, bank statement, identity verification) into a starting point — it never decides or submits anything. Review and edit before confirming.
+          "Draft recommendation" synthesizes the checks already shown on this page (risk flags, bank statement, identity verification) into a starting point — it never decides or submits anything.
         </p>
-        <Textarea label="Notes (optional)" value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Anything the approver should know…" />
-        <div className="flex gap-2">
-          <Button onClick={() => onUnderwriterDecision("APPROVE", notes)} loading={busy} icon={<CheckCircle2 className="h-4 w-4" />}>Recommend approve</Button>
-          <Button variant="outline" onClick={() => onUnderwriterDecision("REJECT", notes)} loading={busy} icon={<XCircle className="h-4 w-4" />}>Recommend reject</Button>
-        </div>
+        {aiReasoning && (
+          <div className="rounded-xl border border-ink-100 bg-ink-50 p-3 dark:border-ink-800 dark:bg-ink-800/40">
+            <p className="mb-1.5 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide text-ink-400">
+              <Sparkles className="h-3 w-3" /> AI-drafted reasoning
+            </p>
+            {/* whitespace-pre-line, not a single run-on paragraph — each
+                blocker/caution/positive draftUnderwriterRecommendation
+                found is its own line now (see that function's own
+                comment), and this is what actually renders those line
+                breaks instead of collapsing them back into one block. */}
+            <p className="whitespace-pre-line text-xs leading-relaxed text-ink-600 dark:text-ink-300">{aiReasoning}</p>
+          </div>
+        )}
+        <Textarea label="Your notes (optional)" value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Anything the approver should know…" />
+        <VoiceCheckGate pending={voiceChecksPending} overridden={voiceCheckOverridden} onOverride={() => setVoiceCheckOverridden(true)}>
+          <div className="flex gap-2">
+            <Button onClick={() => onUnderwriterDecision("APPROVE", notesWithOverrideMarker())} loading={busy} icon={<CheckCircle2 className="h-4 w-4" />}>Recommend approve</Button>
+            <Button variant="outline" onClick={() => onUnderwriterDecision("REJECT", notesWithOverrideMarker())} loading={busy} icon={<XCircle className="h-4 w-4" />}>Recommend reject</Button>
+          </div>
+        </VoiceCheckGate>
       </div>
     );
   }
@@ -584,11 +792,13 @@ function ActionPanel({
     return (
       <div className="space-y-3">
         <Textarea label="Notes (optional)" value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Reason for your decision…" />
-        <div className="flex flex-wrap gap-2">
-          <Button onClick={() => onApproverDecision("APPROVED", notes)} loading={busy} icon={<CheckCircle2 className="h-4 w-4" />}>Approve</Button>
-          <Button variant="outline" onClick={() => onApproverDecision("REJECTED", notes)} loading={busy} icon={<XCircle className="h-4 w-4" />}>Reject</Button>
-          <Button variant="ghost" onClick={() => onApproverDecision("SENT_BACK", notes)} loading={busy} icon={<Undo2 className="h-4 w-4" />}>Send back</Button>
-        </div>
+        <VoiceCheckGate pending={voiceChecksPending} overridden={voiceCheckOverridden} onOverride={() => setVoiceCheckOverridden(true)}>
+          <div className="flex flex-wrap gap-2">
+            <Button onClick={() => onApproverDecision("APPROVED", notesWithOverrideMarker())} loading={busy} icon={<CheckCircle2 className="h-4 w-4" />}>Approve</Button>
+            <Button variant="outline" onClick={() => onApproverDecision("REJECTED", notesWithOverrideMarker())} loading={busy} icon={<XCircle className="h-4 w-4" />}>Reject</Button>
+            <Button variant="ghost" onClick={() => onApproverDecision("SENT_BACK", notes)} loading={busy} icon={<Undo2 className="h-4 w-4" />}>Send back</Button>
+          </div>
+        </VoiceCheckGate>
       </div>
     );
   }
@@ -923,6 +1133,365 @@ function IdentityVerificationCard({ evidence }: { evidence: EvidenceRow[] }) {
   );
 }
 
+/** Voice biometrics — staff-triggered call to the separate voice-service
+ * microservice (see voice-service/README.md). Real SpeechBrain/Resemblyzer
+ * speaker-embedding comparison across the selfie-step and business-
+ * verification recordings, plus a window-cluster multi-speaker scan of
+ * each — but with thresholds that are each library's published default,
+ * not calibrated against real borrower audio, so this is deliberately
+ * framed as advisory throughout, same as the bank-statement authenticity
+ * banner but with an explicit "uncalibrated" caveat that one doesn't need
+ * (PDF-metadata/arithmetic checks there are exact, not threshold-based). */
+function VoiceBiometricsCard({
+  caseId, applicationId, segment, evidence, check, onChecked,
+}: {
+  caseId: string; applicationId: string; segment: SegmentCode;
+  evidence: EvidenceRow[]; check: VoiceBiometricCheckRow | null; onChecked: () => Promise<void>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // This segment's manual (non-AI-detectable) reference items — fetched
+  // once per segment, same endpoint the risk-parameters page uses to edit
+  // them, read-only here. Independent of `check` so the checkbox list
+  // renders even before any AI check has ever run.
+  const [manualItems, setManualItems] = useState<string[] | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/staff/asset-detection-categories?segment=${segment}`)
+      .then((r) => r.json())
+      .then((json) => { if (!cancelled) setManualItems(JSON.parse(json.settings.manualItemsJson ?? "[]")); })
+      .catch(() => { if (!cancelled) setManualItems([]); });
+    return () => { cancelled = true; };
+  }, [segment]);
+
+  const manualTicks: string[] = check?.assetChecklistManualTicksJson ? JSON.parse(check.assetChecklistManualTicksJson) : [];
+  const [manualTickBusy, setManualTickBusy] = useState<string | null>(null);
+  async function toggleManualTick(item: string) {
+    const next = manualTicks.includes(item) ? manualTicks.filter((t) => t !== item) : [...manualTicks, item];
+    setManualTickBusy(item);
+    try {
+      const res = await fetch(`/api/staff/case/${caseId}/asset-checklist-manual`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ticks: next }),
+      });
+      if (res.ok) await onChecked();
+    } finally {
+      setManualTickBusy(null);
+    }
+  }
+
+  const liveness = evidence.find((e) => e.type === "VIDEOPD_LIVENESS");
+  const business = evidence.find((e) => e.type === "VIDEOPD_BUSINESS_VERIFICATION");
+  const liveCall = evidence.find((e) => e.type === "LIVE_CALL_RECORDING");
+  const bothGuidedFlowPresent = !!liveness && !!business;
+  // Asset detection only needs the business-verification clip, so it alone
+  // (without a matching liveness clip) still makes there something to run.
+  const canCheckAnything = bothGuidedFlowPresent || !!liveCall || !!business;
+
+  async function runCheck() {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/staff/voice-check/${applicationId}`, { method: "POST" });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error ?? "Voice check failed.");
+      await onChecked();
+    } catch (e: any) {
+      setError(e.message ?? "Voice check failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const consistencyFlagged = check?.consistencyStatus === "FLAGGED";
+  const guidedFlowMultiFlagged = check?.livenessMultiSpeakerStatus === "FLAGGED" || check?.businessMultiSpeakerStatus === "FLAGGED";
+  const liveCallConsistencyFlagged = check?.liveCallConsistencyStatus === "FLAGGED";
+  const liveCallMultiFlagged = check?.liveCallMultiSpeakerStatus === "FLAGGED";
+  const deepfakeFlagged = check?.livenessDeepfakeStatus === "FLAGGED" || check?.businessDeepfakeStatus === "FLAGGED";
+  const lipSyncFlagged = check?.livenessLipSyncStatus === "FLAGGED" || check?.businessLipSyncStatus === "FLAGGED";
+  const anyFlagged = consistencyFlagged || guidedFlowMultiFlagged || liveCallConsistencyFlagged || liveCallMultiFlagged || deepfakeFlagged || lipSyncFlagged;
+  const checked = !!check?.checkedAt;
+  const guidedFlowChecked = checked && check?.consistencyStatus !== "PENDING";
+  const liveCallChecked = checked && (check?.liveCallMultiSpeakerStatus !== "PENDING" || check?.liveCallConsistencyStatus !== "PENDING");
+  const deepfakeChecked = checked && (check?.livenessDeepfakeStatus !== "PENDING" || check?.businessDeepfakeStatus !== "PENDING");
+  const lipSyncChecked = checked && (check?.livenessLipSyncStatus !== "PENDING" || check?.businessLipSyncStatus !== "PENDING");
+  const assetDetectionChecked = checked && check?.assetDetectionStatus !== "PENDING";
+  const assetChecklist: AssetDetectionChecklistItem[] = check?.assetDetectionChecklistJson ? JSON.parse(check.assetDetectionChecklistJson) : [];
+  const customAssetDetectionChecked = checked && check?.customAssetDetectionStatus !== "PENDING";
+  const customAssetChecklist: AssetDetectionChecklistItem[] = check?.customAssetDetectionChecklistJson ? JSON.parse(check.customAssetDetectionChecklistJson) : [];
+
+  return (
+    <Card className="mb-5">
+      <div className="mb-3 flex items-center justify-between">
+        <SectionTitle icon={<Mic className="h-4 w-4" />}>Voice biometrics</SectionTitle>
+        {checked && (
+          <Badge tone={anyFlagged ? "warning" : "success"}>{anyFlagged ? "Needs review" : "Clean"}</Badge>
+        )}
+      </div>
+      <p className="mb-4 text-xs text-ink-400">
+        Compares voices across the recorded VideoPD steps and the borrower's live call, scans each for more than
+        one distinct voice, and — where enabled — scans the guided-flow recordings for face-manipulation and
+        lip-sync anomalies, plus a work-premises object checklist from the business-verification clip — both a
+        fixed-vocabulary detector (80 everyday categories) and a zero-shot detector that actually looks for this
+        segment's own configured items (a sewing machine, a tractor). Advisory signals for the underwriter to
+        weigh, not calibrated against this lender's own borrowers yet — treat any flag here as worth a
+        listen/look, not a confirmed finding, and the asset checklist as a starting point to verify visually, not
+        a confirmed inventory — the zero-shot suggestions especially, since that model's accuracy runs below a
+        fixed-vocabulary one. Its checklist score is an admin-configured point rubric (tuned at the Asset
+        Scorecard page), not a validated asset valuation — that still needs real loan-outcome data. The
+        live-call voice checks below run automatically the moment the borrower leaves the call — no click needed;
+        use the button for the guided-flow, deepfake, lip-sync, and asset-detection checks (or to re-run
+        everything).
+      </p>
+
+      {!canCheckAnything ? (
+        <p className="text-sm text-ink-400">Nothing to check yet — need either both guided-flow recordings, or a live-call recording.</p>
+      ) : (
+        <>
+          <Button onClick={runCheck} loading={busy} className="mb-3" variant="secondary">
+            {checked ? "Re-run voice check" : "Run voice check"}
+          </Button>
+          {error && (
+            <p className="mb-3 rounded-xl border border-red-200 bg-red-50 p-2.5 text-xs text-red-700 dark:border-red-900/50 dark:bg-red-950/20 dark:text-red-400">
+              {error}
+            </p>
+          )}
+
+          {bothGuidedFlowPresent && guidedFlowChecked && check && (
+            <div className="mb-4">
+              <p className="mb-2 text-[11px] font-bold uppercase tracking-wide text-ink-400">Guided-flow recordings</p>
+              <div className="mb-2 grid grid-cols-1 gap-2 sm:grid-cols-3">
+                <StatChip
+                  icon={<Mic className="h-3.5 w-3.5" />}
+                  label="Voice consistency"
+                  value={check.consistencySimilarity != null ? `${check.consistencySimilarity.toFixed(2)} sim.` : "—"}
+                  warn={consistencyFlagged}
+                />
+                <StatChip
+                  icon={<Users className="h-3.5 w-3.5" />}
+                  label="Selfie-step voices"
+                  value={check.livenessSpeakerCount ?? "—"}
+                  warn={check.livenessMultiSpeakerStatus === "FLAGGED"}
+                />
+                <StatChip
+                  icon={<Users className="h-3.5 w-3.5" />}
+                  label="Business-verification voices"
+                  value={check.businessSpeakerCount ?? "—"}
+                  warn={check.businessMultiSpeakerStatus === "FLAGGED"}
+                />
+              </div>
+              {check.consistencyNotes && (
+                <div className="rounded-xl bg-ink-50 p-2.5 dark:bg-ink-800/40">
+                  <p className="text-xs leading-snug text-ink-500 dark:text-ink-400">{check.consistencyNotes}</p>
+                  {check.consistencyMethod && (
+                    <p className="mt-1 text-[10px] uppercase tracking-wide text-ink-300 dark:text-ink-600">Model: {check.consistencyMethod}</p>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {bothGuidedFlowPresent && deepfakeChecked && check && (
+            <div className="mb-4">
+              <p className="mb-2 text-[11px] font-bold uppercase tracking-wide text-ink-400">Deepfake scan</p>
+              <div className="mb-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                <StatChip
+                  icon={<ScanFace className="h-3.5 w-3.5" />}
+                  label="Selfie-step"
+                  value={check.livenessDeepfakeRatio != null ? `${Math.round(check.livenessDeepfakeRatio * 100)}% frames flagged` : "—"}
+                  warn={check.livenessDeepfakeStatus === "FLAGGED"}
+                />
+                <StatChip
+                  icon={<ScanFace className="h-3.5 w-3.5" />}
+                  label="Business-verification"
+                  value={check.businessDeepfakeRatio != null ? `${Math.round(check.businessDeepfakeRatio * 100)}% frames flagged` : "—"}
+                  warn={check.businessDeepfakeStatus === "FLAGGED"}
+                />
+              </div>
+              <div className="rounded-xl bg-ink-50 p-2.5 dark:bg-ink-800/40">
+                <p className="text-xs leading-snug text-ink-500 dark:text-ink-400">
+                  Frame-level image classifier only — not video-native or temporal analysis, not a maintained
+                  production deepfake detector. Real false-positive risk on compression artifacts, poor lighting,
+                  or low-resolution footage. Treat a flag here as worth a look, not a confirmed finding.
+                </p>
+                {check.deepfakeModel && (
+                  <p className="mt-1 text-[10px] uppercase tracking-wide text-ink-300 dark:text-ink-600">Model: {check.deepfakeModel}</p>
+                )}
+              </div>
+            </div>
+          )}
+
+          {bothGuidedFlowPresent && lipSyncChecked && check && (
+            <div className="mb-4">
+              <p className="mb-2 text-[11px] font-bold uppercase tracking-wide text-ink-400">Lip-sync scan</p>
+              <div className="mb-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                <StatChip
+                  icon={<ScanFace className="h-3.5 w-3.5" />}
+                  label="Selfie-step"
+                  value={check.livenessLipSyncScore != null ? `score ${check.livenessLipSyncScore.toFixed(2)}` : "—"}
+                  warn={check.livenessLipSyncStatus === "FLAGGED"}
+                />
+                <StatChip
+                  icon={<ScanFace className="h-3.5 w-3.5" />}
+                  label="Business-verification"
+                  value={check.businessLipSyncScore != null ? `score ${check.businessLipSyncScore.toFixed(2)}` : "—"}
+                  warn={check.businessLipSyncStatus === "FLAGGED"}
+                />
+              </div>
+              <div className="rounded-xl bg-ink-50 p-2.5 dark:bg-ink-800/40">
+                <p className="text-xs leading-snug text-ink-500 dark:text-ink-400">
+                  Real face detection and landmark alignment feeding a lip-region forgery classifier, benchmarked
+                  on curated research datasets, not this lender's own borrowers. Treat a flag here as worth a
+                  look, not a confirmed finding.
+                </p>
+                {check.lipSyncModel && (
+                  <p className="mt-1 text-[10px] uppercase tracking-wide text-ink-300 dark:text-ink-600">Model: {check.lipSyncModel}</p>
+                )}
+              </div>
+            </div>
+          )}
+
+          {business && (assetDetectionChecked || (manualItems && manualItems.length > 0)) && (
+            <div className="mb-4">
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                <p className="text-[11px] font-bold uppercase tracking-wide text-ink-400">Work-premises asset checklist</p>
+                {check?.assetChecklistScore != null && (
+                  <span className="rounded-full bg-sprout-50 px-2.5 py-1 text-xs font-bold text-sprout-700 dark:bg-sprout-950/30 dark:text-sprout-400">
+                    Checklist score: {check.assetChecklistScore}
+                  </span>
+                )}
+              </div>
+
+              {assetDetectionChecked && check && (
+                <>
+                  {assetChecklist.length === 0 ? (
+                    <p className="mb-2 text-xs text-ink-400">No everyday objects detected with reasonable confidence in the sampled frames.</p>
+                  ) : (
+                    <div className="mb-2 space-y-1.5">
+                      {assetChecklist.map((item) => (
+                        <DetectionItemRow key={item.label} item={item} accent="neutral" />
+                      ))}
+                    </div>
+                  )}
+                  {check.assetDetectionNotes && (
+                    <div className="mb-3 rounded-xl bg-ink-50 p-2.5 dark:bg-ink-800/40">
+                      <p className="text-xs leading-snug text-ink-500 dark:text-ink-400">{check.assetDetectionNotes}</p>
+                      {check.assetDetectionModel && (
+                        <p className="mt-1 text-[10px] uppercase tracking-wide text-ink-300 dark:text-ink-600">Model: {check.assetDetectionModel}</p>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+
+              {customAssetDetectionChecked && check && (
+                <div className="mb-3">
+                  <p className="mb-1.5 text-[11px] font-bold uppercase tracking-wide text-ink-400">
+                    AI-suggested (zero-shot, unverified)
+                  </p>
+                  {customAssetChecklist.length === 0 ? (
+                    <p className="mb-2 text-xs text-ink-400">Nothing spotted with reasonable confidence — still worth checking the video directly.</p>
+                  ) : (
+                    <div className="mb-2 space-y-1.5">
+                      {customAssetChecklist.map((item) => (
+                        <DetectionItemRow key={item.label} item={item} accent="amber" />
+                      ))}
+                    </div>
+                  )}
+                  {check.customAssetDetectionNotes && (
+                    <div className="rounded-xl bg-ink-50 p-2.5 dark:bg-ink-800/40">
+                      <p className="text-xs leading-snug text-ink-500 dark:text-ink-400">{check.customAssetDetectionNotes}</p>
+                      {check.customAssetDetectionModel && (
+                        <p className="mt-1 text-[10px] uppercase tracking-wide text-ink-300 dark:text-ink-600">Model: {check.customAssetDetectionModel}</p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {manualItems && manualItems.length > 0 && (
+                <div>
+                  <p className="mb-1.5 text-[11px] font-semibold text-ink-500 dark:text-ink-400">
+                    Confirm from the video (high-confidence AI suggestions above are pre-ticked — add or remove any item):
+                  </p>
+                  {/* Video sits right next to the checklist so watching and
+                      ticking happen in the same place — found live: this
+                      clip previously only played from a small thumbnail up
+                      in Documents & Evidence, several scrolls away from
+                      here, forcing the underwriter to watch, remember, then
+                      scroll back to tick from memory. */}
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-[240px_1fr]">
+                    {business && (
+                      <video
+                        src={`/api/staff/evidence/${business.id}`}
+                        controls
+                        preload="metadata"
+                        className="aspect-video w-full rounded-xl border border-ink-100 bg-black dark:border-ink-800"
+                      />
+                    )}
+                    <div className="flex flex-wrap content-start gap-1.5">
+                      {manualItems.map((item) => {
+                        const ticked = manualTicks.includes(item);
+                        return (
+                          <button
+                            key={item}
+                            onClick={() => toggleManualTick(item)}
+                            disabled={manualTickBusy === item}
+                            aria-pressed={ticked}
+                            className={cn(
+                              "rounded-full border px-2.5 py-1 text-xs font-medium capitalize transition-colors disabled:opacity-50",
+                              ticked
+                                ? "border-sprout-500 bg-sprout-50 text-sprout-700 dark:border-sprout-500 dark:bg-sprout-950/30 dark:text-sprout-400"
+                                : "border-ink-200 text-ink-400 hover:bg-ink-50 dark:border-ink-700 dark:hover:bg-ink-800"
+                            )}
+                          >
+                            {ticked && <CheckCircle2 className="mr-1 inline h-3 w-3" />}
+                            {item}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {liveCall && liveCallChecked && check && (
+            <div>
+              <p className="mb-2 text-[11px] font-bold uppercase tracking-wide text-ink-400">Live call (Tier 1 — borrower-side audio only)</p>
+              <div className="mb-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                <StatChip
+                  icon={<Mic className="h-3.5 w-3.5" />}
+                  label="Vs. selfie-step voice"
+                  value={check.liveCallConsistencySimilarity != null ? `${check.liveCallConsistencySimilarity.toFixed(2)} sim.` : "No selfie-step recording to compare"}
+                  warn={liveCallConsistencyFlagged}
+                />
+                <StatChip
+                  icon={<Users className="h-3.5 w-3.5" />}
+                  label="Voices on the call"
+                  value={check.liveCallSpeakerCount ?? "—"}
+                  warn={liveCallMultiFlagged}
+                />
+              </div>
+              {check.liveCallConsistencyNotes && (
+                <div className="rounded-xl bg-ink-50 p-2.5 dark:bg-ink-800/40">
+                  <p className="text-xs leading-snug text-ink-500 dark:text-ink-400">{check.liveCallConsistencyNotes}</p>
+                  {check.liveCallConsistencyMethod && (
+                    <p className="mt-1 text-[10px] uppercase tracking-wide text-ink-300 dark:text-ink-600">Model: {check.liveCallConsistencyMethod}</p>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </>
+      )}
+    </Card>
+  );
+}
+
 const STATEMENT_STATUS_TONE: Record<string, "neutral" | "success" | "warning" | "danger"> = {
   PENDING: "neutral", EXTRACTED: "success", NEEDS_REVIEW: "warning", FAILED: "danger",
 };
@@ -1048,6 +1617,44 @@ function StatChip({ icon, label, value, warn }: { icon: React.ReactNode; label: 
   );
 }
 
+// One detected asset per row — a thumbnail cropped from its own detection
+// box (real visual evidence, not just a label and a confidence number the
+// underwriter has to take on faith), the label + count, and a confidence
+// badge. "amber" accent marks a zero-shot suggestion (see the section
+// this renders inside) — same visual language as the rest of that
+// section's honesty-forward styling.
+function DetectionItemRow({ item, accent }: { item: AssetDetectionChecklistItem; accent: "neutral" | "amber" }) {
+  const amber = accent === "amber";
+  return (
+    <div
+      className={cn(
+        "flex items-center gap-3 rounded-xl border p-2",
+        amber ? "border-dashed border-amber-300 bg-amber-50/50 dark:border-amber-800 dark:bg-amber-950/10" : "border-ink-100 dark:border-ink-800"
+      )}
+    >
+      {item.thumbnail ? (
+        // eslint-disable-next-line @next/next/no-img-element -- a small base64 data URI crop, not worth next/image's overhead
+        <img src={item.thumbnail} alt={item.label} className="h-12 w-12 shrink-0 rounded-lg object-cover" />
+      ) : (
+        <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-ink-100 dark:bg-ink-800">
+          <Boxes className="h-5 w-5 text-ink-300 dark:text-ink-600" />
+        </div>
+      )}
+      <p className={cn("min-w-0 flex-1 truncate text-sm font-semibold capitalize", amber ? "text-amber-700 dark:text-amber-400" : "text-ink-700 dark:text-ink-200")}>
+        {item.label} × {item.count}
+      </p>
+      <span
+        className={cn(
+          "shrink-0 rounded-full px-2 py-0.5 text-xs font-bold",
+          amber ? "bg-amber-100 text-amber-700 dark:bg-amber-950/30 dark:text-amber-400" : "bg-ink-100 text-ink-600 dark:bg-ink-800 dark:text-ink-300"
+        )}
+      >
+        {Math.round(item.confidence * 100)}%
+      </span>
+    </div>
+  );
+}
+
 function EvidenceCard({ evidence }: { evidence: EvidenceRow }) {
   const url = `/api/staff/evidence/${evidence.id}`;
   return (
@@ -1058,6 +1665,8 @@ function EvidenceCard({ evidence }: { evidence: EvidenceRow }) {
           <img src={url} alt={evidence.type} className="h-full w-full object-cover" />
         ) : evidence.mimeType.startsWith("video/") ? (
           <video src={url} controls className="h-full w-full object-cover" />
+        ) : evidence.mimeType.startsWith("audio/") ? (
+          <audio src={url} controls className="w-full px-2" />
         ) : (
           <a href={url} target="_blank" rel="noreferrer" className="flex flex-col items-center gap-1 text-xs font-semibold text-ink-500 hover:text-sprout-600">
             <FileText className="h-6 w-6" /> View file

@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
-import { Download, HelpCircle, Inbox, Landmark, LogOut, Search, SlidersHorizontal, Sliders } from "lucide-react";
+import { Download, HelpCircle, Inbox, Info, Landmark, LogOut, Search, SlidersHorizontal, Sliders } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { Input, Select } from "@/components/ui/Input";
 import { ThemeToggle } from "@/components/ThemeToggle";
@@ -27,12 +27,20 @@ interface CaseListItem {
   };
 }
 
+// VIDEOPD_SCHEDULED and VIDEOPD_COMPLETE were missing here — same gap the
+// claim endpoint's own comment documents (see api/staff/case/[id]/claim/
+// route.ts's CLAIMABLE_STATUSES): a case waiting on/back from VideoPD had no
+// way to be filtered to directly, and — worse — silently fell out of the
+// "Pending action" count below, so the dashboard could read 0 while cases
+// genuinely needed claiming (found live ahead of a demo).
 const STATUS_OPTIONS = [
   { value: "", label: "All statuses" },
   { value: "NEW", label: "New" },
   { value: "UNDER_REVIEW", label: "Under review" },
   { value: "AWAITING_CHECKER_REVIEW", label: "Awaiting checker review" },
   { value: "SENT_BACK", label: "Sent back" },
+  { value: "VIDEOPD_SCHEDULED", label: "VideoPD link sent" },
+  { value: "VIDEOPD_COMPLETE", label: "VideoPD complete — ready to claim" },
   { value: "APPROVED", label: "Approved" },
   { value: "REJECTED", label: "Rejected" },
 ];
@@ -49,6 +57,8 @@ const STATUS_TONE: Record<string, "neutral" | "success" | "warning" | "danger" |
   UNDER_REVIEW: "warning",
   AWAITING_CHECKER_REVIEW: "warning",
   SENT_BACK: "danger",
+  VIDEOPD_SCHEDULED: "info",
+  VIDEOPD_COMPLETE: "warning", // ready to claim — same "needs someone's attention" weight as UNDER_REVIEW/AWAITING_CHECKER_REVIEW
   APPROVED: "success",
   REJECTED: "danger",
 };
@@ -68,6 +78,17 @@ export default function StaffQueuePage() {
   const [status, setStatus] = useState("");
   const [segment, setSegment] = useState("");
   const [search, setSearch] = useState("");
+  // Reported live: an Approver picking "All statuses" from the dropdown
+  // saw no change at all — its value is the same empty string the page
+  // starts on, so there was no way to tell "never touched the filter" apart
+  // from "deliberately chose to see everything." The role-based default
+  // below used the untouched-empty-string case for both, meaning an
+  // Approver could never actually see NEW/VIDEOPD_COMPLETE cases through
+  // this dropdown no matter what they picked — despite this file's own
+  // comment claiming "everyone can still see everything via the status
+  // dropdown." This makes that claim true: only an actual onChange (any
+  // value, including re-selecting "All statuses") counts as "touched."
+  const [statusTouched, setStatusTouched] = useState(false);
 
   useEffect(() => {
     const s = getStoredStaff();
@@ -93,19 +114,26 @@ export default function StaffQueuePage() {
 
   // Underwriters primarily work NEW/SENT_BACK/their own UNDER_REVIEW cases;
   // approvers work AWAITING_CHECKER_REVIEW. Not a hard filter — everyone can
-  // still see everything via the status dropdown — just a helpful default.
+  // still see everything via the status dropdown — just a helpful default,
+  // gone the moment the dropdown's been touched at all (statusTouched),
+  // not just when it holds a non-empty value — see that state's own
+  // comment for why the distinction matters.
   const defaultFiltered = useMemo(() => {
-    if (status) return cases; // explicit filter wins
+    if (statusTouched) return cases;
     if (!staff) return cases;
     if (staff.role === "APPROVER") {
       return cases.filter((c) => ["AWAITING_CHECKER_REVIEW", "APPROVED", "REJECTED"].includes(c.status));
     }
     return cases;
-  }, [cases, status, staff]);
+  }, [cases, statusTouched, staff]);
+  const hiddenByDefault = cases.length - defaultFiltered.length;
 
   const counts = useMemo(() => {
     const total = cases.length;
-    const pending = cases.filter((c) => ["NEW", "UNDER_REVIEW", "AWAITING_CHECKER_REVIEW", "SENT_BACK"].includes(c.status)).length;
+    // VIDEOPD_COMPLETE is genuinely pending action (ready to claim) — VIDEOPD_SCHEDULED
+    // is a softer "waiting on the borrower" state but still counts, since an underwriter
+    // can claim and start reviewing before VideoPD finishes (see claim route's own note).
+    const pending = cases.filter((c) => ["NEW", "UNDER_REVIEW", "AWAITING_CHECKER_REVIEW", "SENT_BACK", "VIDEOPD_SCHEDULED", "VIDEOPD_COMPLETE"].includes(c.status)).length;
     const highRisk = cases.filter((c) => c.riskSeverity === "high").length;
     return { total, pending, highRisk };
   }, [cases]);
@@ -185,7 +213,7 @@ export default function StaffQueuePage() {
             className="h-9 pl-9 text-sm"
           />
         </div>
-        <Select value={status} onChange={(e) => setStatus(e.target.value)} className="h-9 w-auto text-sm">
+        <Select value={status} onChange={(e) => { setStatus(e.target.value); setStatusTouched(true); }} className="h-9 w-auto text-sm">
           {STATUS_OPTIONS.map((o) => (
             <option key={o.value} value={o.value}>{o.label}</option>
           ))}
@@ -196,6 +224,29 @@ export default function StaffQueuePage() {
           ))}
         </Select>
       </div>
+
+      {/* Reported live: the stat cards above always count every case, but
+          this table quietly doesn't show all of them for an Approver by
+          default — "Total cases: 7, Pending action: 3" with only 4 rows
+          visible read as broken/inconsistent, with nothing on screen
+          explaining why. This makes the gap visible and gives a one-click
+          way out, rather than requiring the Approver to already know to
+          fiddle with the status dropdown. */}
+      {hiddenByDefault > 0 && (
+        <div className="mb-4 flex flex-wrap items-center gap-2 rounded-2xl border border-ink-100 bg-ink-50 px-4 py-2.5 text-xs text-ink-500 dark:border-ink-800 dark:bg-ink-800/40 dark:text-ink-400">
+          <Info className="h-3.5 w-3.5 shrink-0 text-ink-400" />
+          <span>
+            Showing {defaultFiltered.length} of {cases.length} cases — {hiddenByDefault} more {hiddenByDefault === 1 ? "is" : "are"} still with an underwriter or unclaimed, hidden from your default Approver view.
+          </span>
+          <button
+            type="button"
+            onClick={() => setStatusTouched(true)}
+            className="font-semibold text-sprout-600 underline underline-offset-2 hover:text-sprout-700 dark:text-sprout-400"
+          >
+            Show all cases
+          </button>
+        </div>
+      )}
 
       <div className="overflow-x-auto rounded-2xl border border-ink-100 bg-white dark:border-ink-800 dark:bg-ink-900">
         <table className="w-full text-left text-sm">

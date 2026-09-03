@@ -91,26 +91,59 @@ relay nodes) and deliberate Opus-codec-only handling — this uses the
 browser's default WebRTC codec negotiation, not a configured Opus-only path.
 No regional infrastructure; a single signaling server, wherever it's deployed.
 
-## 3. Real fraud/deepfake/voice-biometric/behavioral detection (BR-31, BR-32, BR-33, BR-41) — liveness/gaze built, deepfake/voice still refused
+## 3. Real fraud/deepfake/voice-biometric/behavioral detection (BR-31, BR-32, BR-33, BR-41) — liveness/gaze/voice-biometrics/deepfake/lip-sync all built
 
 **What's built:** real liveness (blink detection via Eye Aspect Ratio on
 face-api.js landmarks, on-device, `src/lib/liveness.ts`), real biometric
 face-matching (selfie/live-call frame vs. ID proof photo, face-recognition
-descriptor distance, `src/lib/faceMatch.ts`), and a real — not faked —
+descriptor distance, `src/lib/faceMatch.ts`), a real — not faked —
 partial slice of coaching-detection: discrete off-camera glance counting
 (not just cumulative time looking away), running both during the async Step 1
 recording and continuously during a live call, normalized by clip/call
-duration rather than a flat threshold. All advisory, surfaced on the
-underwriter's Identity Verification panel and folded into the case's risk
-flags (visible on the queue, not just the case detail page), never
-auto-decisioning.
+duration rather than a flat threshold; and, as of this build, real
+**voice-biometric matching and multi-speaker detection** (requested live —
+see `voice-service/README.md` for the full picture). A separate Python
+microservice (SpeechBrain ECAPA-TDNN speaker embeddings, Resemblyzer
+fallback + a window-embed-cluster multi-speaker scan) is called from two
+places:
 
-**What's still missing, deliberately not attempted:** deepfake/synthetic-video
-detection, voiceprint/voice-biometric matching, response-timing/hesitation
-analysis, and the background-voice/lip-sync-anomaly slice of coaching-detection
-(BR-41). These remain genuinely hard ML problems needing a trained model or a
-licensed vendor — no credible open-source path was found, so rather than fake
-a result, none of this was attempted.
+- The two guided-flow recordings (`VIDEOPD_LIVENESS` vs.
+  `VIDEOPD_BUSINESS_VERIFICATION`) — voice consistency between them, plus a
+  multi-speaker scan of each.
+- **Tier 1 live-call recording** — the borrower's own browser records its
+  own outgoing audio (audio-only, never video) during the live call, behind
+  an explicit on-screen consent step, and uploads it as `LIVE_CALL_RECORDING`
+  evidence when the call ends. Compared against the selfie-step recording
+  for consistency, and scanned for a second voice.
+
+Both staff-triggered (not automatic — the voice service is a separate
+process that isn't guaranteed running, and its similarity/distance
+thresholds are each library's published default, not calibrated against
+Lakshya's own borrower population), surfaced on the case page's "Voice
+biometrics" panel, and folded into the case's risk flags the same generic
+way every other check is, reaching the draft-recommendation agent and both
+underwriter/approver roles automatically.
+
+Real limitation worth being explicit about: the live call itself is
+genuine peer-to-peer WebRTC (`useCallRoom.ts`) with no server-side media
+access at all — Tier 1 is post-call analysis of a recording the borrower's
+own browser made, not real-time. True real-time in-call alerts (Tier 2)
+would need rolling audio chunks shipped off the browser during the call and
+a reworked streaming-inference pipeline — scoped in conversation, not
+built; revisit if Tier 1 proves useful in practice.
+
+**Deepfake detection is now built** (frame-level image classifier — see
+item 10e for the full account) — no longer "not attempted." **Lip-sync
+analysis is now built too** (LipForensics, a real face-forgery detector
+trained on lip-region temporal artifacts — see item 10f for the full
+account, including the two real dead ends hit first: a broken PyPI package,
+then a non-commercially-licensed generator).
+
+Still missing: response-timing/hesitation analysis, and — distinct
+from "a second voice was detected" above — actually judging whether that
+second voice was *coaching* the borrower, which would need real content/
+intent understanding this app doesn't have anywhere (see
+`underwriterAgent.ts`'s own doc comment on this same boundary).
 
 ## 4. Document authenticity checks (BR-15, BR-34)
 
@@ -146,22 +179,31 @@ spoofing the signals it reads. The answer-similarity check is explicitly
 lexical, not NLU — it catches reused wording, not two different phrasings of
 the same idea (that's item 8's still-missing gap, unchanged).
 
-## 6. Scanned-PDF OCR fallback — stated blocker no longer accurate; not yet built
+## 6. Scanned-PDF OCR fallback — built
 
 The bank-statement pipeline (`src/lib/bankStatement.ts`) tries a PDF's native
-text layer first, then falls back to ICR/OCR for image files. A **scanned
-PDF with no text layer** currently gets flagged `NEEDS_REVIEW` rather than
-OCR'd, because that requires rasterizing PDF pages to images first. This
-entry used to say that needed a native renderer this environment couldn't
-reliably install — **no longer true**: `pdfjs-dist` is now a real, proven
-dependency in this exact codebase (added for the PDF face-match work,
-`src/lib/faceMatch.ts` — genuinely renders a PDF page to a canvas, verified
-against real documents). The same technique could feed a scanned bank
-statement's rendered page into the existing Tesseract OCR path instead of
-flagging `NEEDS_REVIEW` outright — a real, now-unblocked extension of
-existing code, just not yet built. A borrower can still work around this
-today by photographing the statement instead (routes to the OCR path
-directly).
+text layer first. A **scanned PDF with no text layer** used to get flagged
+`NEEDS_REVIEW` outright; now it falls back to rasterizing each page
+(`scripts/rasterize-pdf.py`, PyMuPDF — a real, pip-installable-without-a-
+native-compiler renderer, distinct from the `pdfjs-dist`+`node-canvas` path
+this entry originally proposed, which would have hit the same native-compile
+wall as `webrtcvad` did for the voice-biometrics work) and OCRing each
+rendered page (Tesseract.js, same engine already used for plain-image
+uploads). Capped at 15 pages. The result is labeled `viaOcr: true` end to
+end, so the existing OCR-noise caveat on the transaction-integrity check
+(`checkTransactionIntegrity`) applies to a rasterized-then-OCR'd PDF exactly
+as it already did for a plain photographed statement — no separate handling
+needed, same signal, same honesty caveat.
+
+Verified live against a real synthetic scanned PDF (text rendered as a page
+image, no text layer, confirmed via `extract-pdf.js` returning empty text
+first) through the actual running API route: OCR recovered all 7 statement
+lines correctly, transactions parsed and reconciled, `EligibilityFlag:
+ELIGIBLE`, and the PDF-structure authenticity check ran for real (not
+`NOT_APPLICABLE`) since a rasterized-then-OCR'd PDF still has real PDF
+structure (revision count, Producer/Creator) to check, unlike a plain image
+upload. A borrower can still work around a scanned PDF by photographing the
+statement directly too (routes straight to the plain-image OCR path).
 
 ## 7. Real bank-statement format coverage
 
@@ -322,12 +364,38 @@ than a fabricated or silently-missing translation. Worth a real vendor
 (Azure Translator, Google Cloud Translation) before production, but the
 integration seam (`translateText()`) doesn't change shape if swapped.
 
-## 12. Background/async statement processing
+## 12. Background/async statement processing — done
 
-Bank-statement extraction currently runs synchronously inside the upload
-request (OCR can take several seconds). Fine for a prototype; a production
-build should queue it and let the borrower continue to the next step while
-it completes.
+Bank-statement extraction used to run synchronously inside the upload
+request (OCR can take several seconds, longer with the scanned-PDF fallback
+item 6 added). Now split: the route saves the file, creates the
+`BankStatement` row as `PENDING`, and responds immediately; extraction,
+parsing, eligibility, and authenticity checks run afterward in a genuine
+fire-and-forget background task (`processStatement` in
+`api/videopd/[token]/bank-statement/route.ts`) that updates the same row —
+and folds risk flags into the Lead's summary — once it finishes. The
+borrower's own upload UI (`StatementStep` in `videopd/[token]/page.tsx`)
+needed no changes: it already only waited for the upload request itself to
+resolve, never called `.json()` on the response, and its "processing…" /
+"received, thank you" copy was already accurate for an async model (it
+never claimed "fully analyzed"). The underwriter's case page now polls
+every 3s while the latest statement is `PENDING`, stopping itself once it
+resolves, so the real result appears without a manual refresh.
+
+Verified live: uploaded a scanned PDF (the slowest path — rasterize + OCR),
+confirmed the upload response returned the `PENDING` row immediately rather
+than waiting on extraction, then confirmed via direct polling that the row
+transitioned to `EXTRACTED` with correct metrics/eligibility/authenticity
+data a few seconds later, fully unattended.
+
+Real, stated limitation: this fire-and-forget approach is correct because
+this app runs as a long-lived Node process (`next dev`/`next start`) — the
+promise genuinely keeps running after the response is sent. It would NOT be
+correct on a serverless/edge deployment (e.g. Vercel functions), which can
+suspend or kill a function once its response is sent with no guarantee an
+un-awaited promise finishes. A real production deployment on serverless
+infra would need an actual queue (a DB-backed job table polled by a worker,
+or a managed queue service), not this in-process technique.
 
 ## 13. Session step-resume — done
 
@@ -371,6 +439,162 @@ confirmed `underwriterRecommendation` stayed `null` and the case stayed
 permanently prefixed `[AI-drafted — reviewed before submission]` if used,
 so the audit trail always shows what originated as a draft vs. what the
 underwriter wrote themselves.
+
+## 10c. Voice biometrics — deepfake/lip-sync/voice-biometric/coaching pipeline (requested live, named tools challenged/researched), built for the parts with a real open-source path
+
+Requested live as a full pipeline using three named tools: "VeriFusion for
+deepfake + lip-sync detection, SpeechBrain + Resemblyzer for voice
+biometrics, Demucs for background-voice coaching detection." Researched
+each rather than answering from memory, per-tool verdict below, then built
+what actually checked out real — see section 3 above for the fuller
+picture, `voice-service/README.md` for the technical detail.
+
+- **VeriFusion** — could not be verified as a real, accessible open-source
+  project via search. Not used. Real alternatives exist for lip-sync
+  detection specifically (SyncNet, LIPINC, LipFD, DeepFake-O-Meter v2.0) but
+  are research-grade code, not maintained libraries — not attempted this
+  round; see section 3's "still missing" list.
+- **SpeechBrain + Resemblyzer** — real, verified, built. ECAPA-TDNN
+  (SpeechBrain) as the primary speaker-embedding model, Resemblyzer as an
+  automatic fallback if the SpeechBrain model fails to load, both honestly
+  labeled in every API response's `method` field.
+- **Demucs** — real, but it's music vocal/instrument separation, not
+  speaker-vs-speaker separation; the research found supports it only as a
+  modest diarization *preprocessing* step, not a coaching detector by
+  itself. Not used — the multi-speaker scan does direct window-embed-cluster
+  diarization on the raw audio instead (see `diarize.py`'s own doc comment
+  for why pyannote/NeMo, the actual state-of-the-art diarization tools,
+  weren't used either: both need either a gated HuggingFace auth token or a
+  much heavier install than fits a prototype).
+
+**What got built**: two staff-triggered checks (voice consistency, 
+multi-speaker scan) over the two guided-flow recordings, PLUS a Tier 1
+live-call version — the borrower's own browser records its own audio
+(consent-gated, audio-only) during the live call and uploads it when the
+call ends, analyzed the same way. All four resulting risk flags stay
+"medium"/advisory (thresholds are each library's published default, not
+calibrated against real Lakshya borrowers) and flow through the same
+generic risk-flag path as every other check, reaching the draft-
+recommendation agent and both maker/checker roles automatically.
+
+**Explicitly not built**: true real-time in-call alerts (Tier 2) — scoped
+in conversation (would need rolling audio chunks shipped off the browser
+during the live call, a reworked streaming-inference pipeline, and a
+live-alert channel back to the underwriter), not built; and "coaching" as
+a confirmed judgment — a detected second voice is a real signal worth a
+listen, not proof of coaching, which would need content/intent
+understanding this app doesn't have (same boundary as
+`underwriterAgent.ts`'s "NOT CONSIDERED" list).
+
+## 10e. Deepfake detection (requested live, explicitly acknowledged as research-grade, "implement anyway for demo purpose") — deepfake built, lip-sync's first candidate concretely blocked (see 10f for what shipped instead)
+
+Follow-up to 10c above, which had left both deepfake and lip-sync as "not
+attempted this round." Asked again, explicitly accepting the research-grade
+framing — both were genuinely attempted this time, not just researched.
+
+**Deepfake — built** (`voice-service/deepfake.py`, `POST /deepfake-check`).
+Samples 8 frames from a guided-flow recording via ffmpeg, classifies each
+with [`prithivMLmods/Deepfake-Detect-Siglip2`](https://huggingface.co/prithivMLmods/Deepfake-Detect-Siglip2)
+(a real, downloadable, correctly-labeled Siglip2 image classifier via the
+standard `transformers` API), and flags if enough sampled frames score
+above a fake-probability threshold. Frame-level image forensics only, not
+video-native or temporal analysis — stated in the risk-flag text itself.
+Verified end-to-end: real ffmpeg frame extraction, real model inference,
+correct label mapping (`{0: 'Fake', 1: 'Real'}`, matched by searching
+`id2label` rather than a hardcoded index), and a full pipeline run against
+a real test video that correctly, confidently flagged an obviously-synthetic
+(SVG-drawn) face as fake — a real, if indirect, sanity check that the model
+discriminates sensibly. Wired into the same staff-triggered "Run voice
+check" flow, same generic risk-flag path, and — per the explicit ask —
+**admin-toggleable** (`FeatureSettings.deepfakeCheckEnabled`, a new
+Approver-only toggle on `/staff/risk-parameters`) so it can be turned off
+without an engineering change.
+
+**Lip-sync — genuinely attempted, concretely blocked, not shipped.** Found
+and installed `syncnet-python` (PyPI, MIT-licensed, a real community port
+of the original SyncNet with matching pretrained weights mirrored on
+HuggingFace by the same maintainer). Actually tested it, not just read the
+README: every documented public entry point evaluates to `None` at import
+time (`SyncNetPipeline`, `SyncNetInstance` imported the top-level way), and
+the package's own bundled example script fails with `ModuleNotFoundError:
+No module named 'syncnet_pipeline'` — a broken import in the package's own
+shipped code, version 0.2.2. The underlying legacy implementation is real
+and importable directly, bypassing the broken package init, but using it
+correctly means hand-assembling the original multi-stage pipeline (face
+detection → tracking → per-shot cropping → audio alignment → model
+evaluation) from a Beta-status third-party port with no working reference
+to check against — a real risk of shipping a plausible-looking but silently
+wrong "confidence score" to an underwriter. Not shipped as `syncnet-python`.
+
+## 10f. Lip-sync detection, take two (asked directly: "can we replace SyncNet with Wav2Lip?") — Wav2Lip rejected on license, LipForensics shipped instead
+
+Wav2Lip (`Rudrabha/Wav2Lip`) isn't actually a lip-sync *detector* — it's a
+*generator* (edits a video's mouth movement to match new audio). What it
+uses internally to judge sync quality (the LSE-C/LSE-D metrics cited
+throughout the lip-sync research literature) is itself a SyncNet-
+architecture discriminator, so "replace SyncNet with Wav2Lip" wasn't quite
+a like-for-like swap to begin with. More decisively: its GitHub README
+states the repository "can only be used for personal/research/non-
+commercial purposes" — confirmed by cloning the real repo and reading the
+actual LICENSE/README text, not assumed. A genuine legal blocker for a
+commercial lending product, unrelated to whether the code works. Rejected
+on that basis alone.
+
+**What shipped instead**: [LipForensics](https://github.com/ahaliassos/LipForensics)
+(`ahaliassos/LipForensics`, CVPR 2021, MIT-licensed — confirmed by reading
+the actual LICENSE file) — architecturally the right kind of tool from the
+start: a real face-forgery detector trained specifically on lip-region
+temporal artifacts, not a generator. Full real pipeline built and verified
+end-to-end against a real photograph: ffmpeg frame extraction → real face
+detection + 68-point landmarks (`ibug.face_detection`/`ibug.face_alignment`,
+MIT-licensed, weights bundled in-repo — sidesteps a real dead end hit along
+the way, the original `face-alignment` PyPI package's own weight host,
+`adrianbulat.com`, being unreachable from this sandbox) → mouth-region
+alignment/crop (vendored directly from LipForensics' own preprocessing
+code) → the real pretrained forgery classifier. One real bug found and
+fixed in the vendored code: the original checkpoint loader hardcoded a
+CUDA device regardless of what was requested, crashing on this CPU-only
+machine even when `device="cpu"` was passed explicitly.
+
+Wired the same way as deepfake detection — same staff-triggered "Run voice
+check" flow, same generic risk-flag path (`LIP_SYNC_ANOMALY`), and its own
+independent admin toggle (`FeatureSettings.lipSyncCheckEnabled`). Full
+technical account in `voice-service/README.md`'s "Deepfake/lip-sync"
+section.
+
+## 10d. ID-document text cross-check (self-identified gap, approved to build) — done
+
+Previously listed in `underwriterAgent.ts`'s own "NOT CONSIDERED" doc comment:
+face-match (`faceMatch.ts`) only ever compares the ID proof PHOTO against the
+borrower's liveness recording — nothing checked whether the ID NUMBER printed
+on the document matched what the borrower typed into the application form.
+A borrower could upload someone else's (or a fabricated) ID photo bearing
+their own typed number and nothing would catch the mismatch.
+
+**What's built** (`src/lib/idProofCheck.ts`): OCRs the ID_PROOF photo at
+upload time (`api/upload/route.ts`, same Tesseract.js engine as the bank-
+statement OCR path) and regex-extracts an ID number, compared against the
+declared `idNumber`. Reliable extraction only exists for ID types with a
+genuinely consistent national format — Aadhaar (12 digits), PAN (5 letters +
+4 digits + 1 letter, a fixed government-mandated format), and Voter ID/EPIC
+(3 letters + 7 digits). Driving licence numbers vary too much by issuing
+state to match reliably by pattern — deliberately returns "not attempted"
+rather than guessing and producing unreliable false mismatches. Result is
+stored on the ID_PROOF evidence row's own `authenticityStatus`/
+`authenticityNotes` (previously unused for this evidence type), which the
+case page's evidence grid already renders generically — no UI changes
+needed. A `FLAGGED` result folds into `Lead.summary.riskFlags`
+(`ID_PROOF_NUMBER_MISMATCH`, "medium"/advisory — OCR misreads on a
+photographed card are common) at `/api/submit` time, reaching the queue,
+the case page, and the draft-recommendation agent the same generic way
+every other check does.
+
+Image-only for now — a PDF ID proof would need the same PDF-to-image
+rendering step item 6 above just added for bank statements; not yet wired
+up for ID proofs specifically. Verified live: a real OCR'd test ID card
+image through the actual upload/submit API routes, both a matching and a
+deliberately mismatched declared number, confirmed correct `PASSED`/
+`FLAGGED` results and risk-flag folding.
 
 ## Permanent scope boundaries (not "future work" — explicitly excluded)
 

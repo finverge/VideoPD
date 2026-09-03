@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Mic, MicOff, Video as VideoIcon, VideoOff, PhoneOff, PhoneCall, Loader2, AlertTriangle, Users, WifiOff, Headphones, Eye, EyeOff, Captions } from "lucide-react";
+import { Mic, MicOff, Video as VideoIcon, VideoOff, PhoneOff, PhoneCall, Loader2, AlertTriangle, Users, WifiOff, Headphones, Eye, EyeOff, Captions, ShieldCheck } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useCallRoom, type CallParticipant } from "@/lib/useCallRoom";
+import { useCallAudioRecorder } from "@/lib/useCallAudioRecorder";
 import { Button } from "@/components/ui/Button";
 import type { LangCode } from "@/types";
 
@@ -17,14 +18,18 @@ const SIGNALING_URL = process.env.NEXT_PUBLIC_SIGNALING_URL ?? "ws://localhost:4
 /** Drop-in live video call panel — pass the same roomId on both the
  * borrower's VideoPD page and the underwriter's case page (this app keys it
  * off the VideoPD session token) and whoever opens it second connects to
- * whoever opened it first. No recording, no server-side media handling —
- * genuinely real-time only. */
+ * whoever opened it first. By default, no recording, no server-side media
+ * handling — genuinely real-time only; pass recordForVoiceCheck to opt one
+ * instance into Tier 1 voice-biometrics recording (see that prop's own doc
+ * comment — audio-only, borrower-side, consent-gated). */
 export function LiveCallRoom({
   roomId,
   displayName,
   analyzeLiveness = false,
   transcribe = false,
   lang = "en",
+  recordForVoiceCheck = false,
+  applicationId,
 }: {
   roomId: string;
   displayName: string;
@@ -38,6 +43,18 @@ export function LiveCallRoom({
    * instance in a call; each side only ever transcribes its own mic. */
   transcribe?: boolean;
   lang?: LangCode;
+  /** Pass true ONLY on the borrower's own call instance — records this
+   * participant's own outgoing audio (never the remote underwriter's audio,
+   * never any video) for Tier 1 voice-biometrics analysis after the call
+   * (see useCallAudioRecorder.ts and voice-service/README.md). Requires an
+   * explicit on-screen consent step before the call can be joined — shows a
+   * different join screen than the plain "join a live call" one, and
+   * recording only ever starts after the borrower accepts it. Uploaded as
+   * LIVE_CALL_RECORDING evidence when the borrower leaves the call. */
+  recordForVoiceCheck?: boolean;
+  /** Required when recordForVoiceCheck is true — where to upload the
+   * recording to. */
+  applicationId?: string;
 }) {
   const {
     joined, localStream, participants, error, audioOnly, connectionQuality, transcriptSegments,
@@ -53,11 +70,26 @@ export function LiveCallRoom({
   const [micOn, setMicOn] = useState(true);
   const [camOn, setCamOn] = useState(true);
   const [joining, setJoining] = useState(false);
+  const [recordingConsented, setRecordingConsented] = useState(false);
+  const [uploadingRecording, setUploadingRecording] = useState(false);
   const transcriptListRef = useRef<HTMLDivElement>(null);
+  const { startRecording, stopAndGetBlob } = useCallAudioRecorder();
+  const recordingStartedRef = useRef(false);
 
   useEffect(() => {
     transcriptListRef.current?.scrollTo({ top: transcriptListRef.current.scrollHeight, behavior: "smooth" });
   }, [transcriptSegments]);
+
+  // Starts recording the moment the mic stream is actually available —
+  // consent was already required to reach this point (see the join screen
+  // below), so nothing further gates this beyond the stream existing.
+  useEffect(() => {
+    if (recordForVoiceCheck && localStream && !recordingStartedRef.current) {
+      recordingStartedRef.current = true;
+      startRecording(localStream);
+    }
+    if (!joined) recordingStartedRef.current = false; // new call session — allow recording to (re)start next time
+  }, [recordForVoiceCheck, localStream, joined, startRecording]);
 
   async function handleJoin() {
     setJoining(true);
@@ -65,12 +97,58 @@ export function LiveCallRoom({
     setJoining(false);
   }
 
+  async function handleLeave() {
+    if (recordForVoiceCheck && applicationId) {
+      setUploadingRecording(true);
+      try {
+        const blob = await stopAndGetBlob();
+        if (blob && blob.size > 0) {
+          const ext = blob.type.includes("mp4") ? "m4a" : blob.type.includes("ogg") ? "ogg" : "webm";
+          const form = new FormData();
+          form.append("file", blob, `live-call-${Date.now()}.${ext}`);
+          form.append("applicationId", applicationId);
+          form.append("type", "LIVE_CALL_RECORDING");
+          await fetch("/api/upload", { method: "POST", body: form }).catch(() => {
+            // Upload failing shouldn't block the borrower from actually
+            // leaving the call — this is an advisory analysis feature, not
+            // a required step in the loan flow.
+          });
+        }
+      } finally {
+        setUploadingRecording(false);
+      }
+    }
+    leave();
+  }
+
   if (!joined) {
+    if (recordForVoiceCheck && !recordingConsented) {
+      return (
+        <div className="flex flex-col items-center gap-3 rounded-2xl border-2 border-dashed border-ink-200 p-6 text-center dark:border-ink-700">
+          <ShieldCheck className="h-8 w-8 text-ink-300 dark:text-ink-600" />
+          <p className="max-w-sm text-sm text-ink-600 dark:text-ink-300">
+            This call records your side of the audio only (never video) for identity verification —
+            checking your voice is consistent with your earlier recordings and that no one else is
+            speaking on your behalf. It's reviewed by an underwriter, not used to auto-decide anything.
+          </p>
+          {error && (
+            <p className="flex items-center gap-1.5 text-xs font-medium text-red-500">
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0" /> {error}
+            </p>
+          )}
+          <Button onClick={() => setRecordingConsented(true)} icon={<ShieldCheck className="h-4 w-4" />}>
+            I understand — continue
+          </Button>
+        </div>
+      );
+    }
     return (
       <div className="flex flex-col items-center gap-3 rounded-2xl border-2 border-dashed border-ink-200 p-6 text-center dark:border-ink-700">
         <Users className="h-8 w-8 text-ink-300 dark:text-ink-600" />
         <p className="max-w-xs text-sm text-ink-500 dark:text-ink-400">
-          Join a real, live video call — not a recording. Both sides need to open this to connect.
+          {recordForVoiceCheck
+            ? "Your audio will be recorded for this call, as described above."
+            : "Join a real, live video call — not a recording. Both sides need to open this to connect."}
         </p>
         {error && (
           <p className="flex items-center gap-1.5 text-xs font-medium text-red-500">
@@ -182,11 +260,13 @@ export function LiveCallRoom({
           <Headphones className="h-4 w-4" />
         </button>
         <button
-          onClick={leave}
-          className="flex h-11 items-center gap-1.5 rounded-full bg-red-500 px-4 text-sm font-semibold text-white hover:bg-red-600"
+          onClick={handleLeave}
+          disabled={uploadingRecording}
+          className="flex h-11 items-center gap-1.5 rounded-full bg-red-500 px-4 text-sm font-semibold text-white hover:bg-red-600 disabled:opacity-60"
           aria-label="Leave call"
         >
-          <PhoneOff className="h-4 w-4" /> Leave call
+          {uploadingRecording ? <Loader2 className="h-4 w-4 animate-spin" /> : <PhoneOff className="h-4 w-4" />}
+          {uploadingRecording ? "Saving…" : "Leave call"}
         </button>
       </div>
       {audioOnly && (

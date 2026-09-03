@@ -59,6 +59,13 @@ export async function POST(req: NextRequest) {
   });
 
   const flaggedEvidenceCount = application.evidence.filter((e) => e.qualityStatus === "FLAGGED").length;
+
+  // ID-document text cross-check (src/lib/idProofCheck.ts) — computed at
+  // upload time (api/upload/route.ts), read back here the same way
+  // flaggedEvidenceCount above reads qualityStatus.
+  const idProofEvidence = application.evidence.find((e) => e.type === "ID_PROOF");
+  const idProofNumberMismatchDetail =
+    idProofEvidence?.authenticityStatus === "FLAGGED" ? idProofEvidence.authenticityNotes : null;
   // Same borrower (same Borrower row, i.e. same verified mobile), any other
   // application that's already become a Lead — regardless of that lead's
   // status, since even an already-decided one is worth an underwriter
@@ -90,6 +97,7 @@ export async function POST(req: NextRequest) {
     otherLeadCount,
     sharedDeviceLeadCount,
     riskParameters,
+    idProofNumberMismatchDetail,
   });
 
   const summary: InitialSummary = {

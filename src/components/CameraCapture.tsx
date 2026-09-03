@@ -32,8 +32,48 @@ export interface LivenessCaptureResult {
   descriptor: number[] | null;
 }
 
+// Reported live, still happening after the mp4-vs-webm fix above: the
+// review player showed no duration (just "0:00", no seek bar at all) and
+// Play did nothing. Separate, well-documented Chromium bug, not the one
+// that fix addressed: a MediaRecorder blob built from one single
+// end-of-recording Blob (this component's start()/stop() never passes a
+// timeslice, so there's exactly one ondataavailable at the very end,
+// matching startRecording() below) often has no Cues/seek index written
+// into it, and Chrome's own <video> element reports `duration: Infinity`
+// for that — which is what makes the native control hide its seek bar and
+// show a bare "0:00" with nowhere for Play to visibly go. Couldn't
+// reproduce it directly in this environment's own Chrome build (it played
+// back fine here even at 8+ seconds), which points at this being
+// version/hardware-dependent — exactly the kind of intermittent bug this
+// workaround exists for. The fix is the standard one for this exact
+// Chromium issue: force a seek near the end (which makes Chrome actually
+// walk the file and discover the real duration) then seek back to the
+// start — safe to run unconditionally, since it's a no-op whenever
+// duration was already fine.
+function fixInfiniteDuration(video: HTMLVideoElement) {
+  if (isFinite(video.duration)) return;
+  const onTimeUpdate = () => {
+    video.currentTime = 0;
+    video.removeEventListener("timeupdate", onTimeUpdate);
+  };
+  video.addEventListener("timeupdate", onTimeUpdate);
+  video.currentTime = Number.MAX_SAFE_INTEGER;
+}
+
 function pickVideoMimeType(): string {
-  const candidates = ["video/mp4", "video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"];
+  // WebM first, not mp4 — reported live: "End" (stop recording) and Retake
+  // both worked, but the review player's Play button silently did nothing.
+  // Reproduced directly: MediaRecorder's mp4 muxer (Chrome's own, a newer
+  // and far less battle-tested addition than its webm path) produced a
+  // blob whose <video> element happily reported a valid loadedmetadata
+  // event and a finite duration — which is why Retake's preview swap and
+  // the player's UI looked fine — but calling .play() on it never actually
+  // advanced playback at all. WebM recorded through the exact same
+  // MediaRecorder→Blob→blob-URL pipeline played back correctly. Browsers
+  // that only support mp4 recording (older Safari) still get it — each
+  // candidate is still gated by isTypeSupported, so this only changes
+  // which one wins on a browser (Chrome/Edge/Firefox) that supports both.
+  const candidates = ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm", "video/mp4"];
   for (const c of candidates) {
     if (typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported?.(c)) return c;
   }
@@ -240,6 +280,14 @@ export function CameraCapture({
       const blob = new Blob(chunksRef.current, { type: mimeType });
       const ext = mimeType.includes("mp4") ? "mp4" : "webm";
       const file = new File([blob], `capture-${Date.now()}.${ext}`, { type: mimeType });
+      // Temporary diagnostic — replay still reported broken after two
+      // targeted fixes (mp4-vs-webm priority, Infinity-duration workaround)
+      // that couldn't be reproduced/confirmed in this dev environment (no
+      // real camera access here to test against). Logs exactly what got
+      // recorded so the next real repro has actual numbers instead of
+      // another guess — safe to remove once the real cause is confirmed.
+      // eslint-disable-next-line no-console
+      console.log("[CameraCapture] recorded", { mimeType, chunkCount: chunksRef.current.length, blobSize: blob.size, seconds: secondsRef.current });
       setCapturedFile(file);
       setCapturedUrl(URL.createObjectURL(blob));
     };
@@ -364,7 +412,31 @@ export function CameraCapture({
               // eslint-disable-next-line @next/next/no-img-element
               <img src={capturedUrl} alt="Captured preview" className="h-full w-full object-cover" />
             ) : (
-              <video src={capturedUrl} controls className="h-full w-full object-cover" />
+              <video
+                src={capturedUrl}
+                controls
+                onLoadedMetadata={(e) => {
+                  const v = e.currentTarget;
+                  // eslint-disable-next-line no-console
+                  console.log("[CameraCapture] review player loadedmetadata", {
+                    duration: v.duration, videoWidth: v.videoWidth, videoHeight: v.videoHeight,
+                    // If this is ever non-null, it's the smoking gun: this
+                    // element still has the LIVE camera stream attached via
+                    // srcObject, which browsers play in preference to `src`
+                    // regardless of what src points at — exactly matching
+                    // "clicking Play shows the live camera" reported live.
+                    unexpectedSrcObject: v.srcObject ? String(v.srcObject) : null,
+                  });
+                  if (v.srcObject) v.srcObject = null; // belt-and-braces: never let a stray srcObject win over the recorded blob
+                  fixInfiniteDuration(v);
+                }}
+                onError={(e) => {
+                  const err = e.currentTarget.error;
+                  // eslint-disable-next-line no-console
+                  console.error("[CameraCapture] review player error", { code: err?.code, message: err?.message });
+                }}
+                className="h-full w-full object-cover"
+              />
             )
           ) : (
             <>

@@ -234,12 +234,13 @@ function QuestionCard({
     onError(null);
     setBusy(true);
     try {
+      // Only the English prompt is ever sent — the other 5 languages are
+      // never directly editable here (see this endpoint's own doc comment
+      // for why); the server re-translates and overwrites them from
+      // whatever promptEn ends up being.
       const res = await fetch(`/api/staff/questions/${question.id}`, {
         method: "PATCH", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          promptEn: draft.promptEn, promptHi: draft.promptHi, promptTe: draft.promptTe,
-          promptTa: draft.promptTa, promptKn: draft.promptKn, promptMl: draft.promptMl,
-        }),
+        body: JSON.stringify({ promptEn: draft.promptEn }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Something went wrong.");
@@ -312,15 +313,28 @@ function QuestionCard({
             <div className="mt-4 space-y-3 border-t border-ink-100 pt-4 dark:border-ink-800">
               {editing ? (
                 <>
-                  <Textarea label="English" value={draft.promptEn} onChange={(e) => setDraft({ ...draft, promptEn: e.target.value })} />
-                  {LANG_FIELDS.map(({ field, label }) => (
-                    <Textarea
-                      key={field}
-                      label={label}
-                      value={(draft[field] as string) ?? ""}
-                      onChange={(e) => setDraft({ ...draft, [field]: e.target.value })}
-                    />
-                  ))}
+                  {/* Only English is ever hand-edited here — reported live:
+                      exposing all 6 language fields as free-text let staff
+                      who mostly can't read Hindi/Telugu/Tamil/Kannada/
+                      Malayalam edit those directly, with nothing to stop a
+                      translation quietly drifting from the English prompt
+                      it's supposed to match. The other 5 are re-derived
+                      from whatever's saved here (api/staff/questions/[id]/
+                      route.ts), same as a brand-new question already
+                      works — shown read-only below so staff can still
+                      review what will go live, just not hand-edit it. */}
+                  <Textarea label="Prompt (English)" hint="Saving re-translates the other 5 languages from this text." value={draft.promptEn} onChange={(e) => setDraft({ ...draft, promptEn: e.target.value })} />
+                  <div className="space-y-2 rounded-xl border border-ink-100 p-3 dark:border-ink-800">
+                    <p className="text-[11px] font-semibold text-ink-400">Auto-translated on save — not directly editable</p>
+                    {LANG_FIELDS.map(({ field, label }) => (
+                      <div key={field}>
+                        <p className="text-[11px] font-bold uppercase tracking-wide text-ink-400">{label}</p>
+                        <p className={cn("text-sm", question[field] ? "text-ink-700 dark:text-ink-200" : "italic text-amber-600 dark:text-amber-400")}>
+                          {(question[field] as string) || "Not translated yet."}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
                   <div className="flex gap-2">
                     <Button size="sm" loading={busy} onClick={save}>Save changes</Button>
                     <Button size="sm" variant="ghost" onClick={() => { setDraft(question); setEditing(false); }}>Cancel</Button>

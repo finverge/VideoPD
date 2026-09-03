@@ -41,6 +41,12 @@ enum EvidenceType {
   SELFIE
   VIDEOPD_LIVENESS              // VideoPD Step 1 capture — distinct from the portal-stage SELFIE
   VIDEOPD_BUSINESS_VERIFICATION // VideoPD Step 3 capture — distinct from portal-stage BUSINESS_PHOTO/VIDEO
+  LIVE_CALL_RECORDING           // Borrower-side audio-only recording of the live underwriter call
+                                 // (Tier 1 voice-biometrics, see voice-service/README.md and
+                                 // LiveCallRoom's recordForVoiceCheck prop) — audio only, never video,
+                                 // and only ever captured with the borrower's explicit on-screen consent
+                                 // before the call starts. Nothing about the live call is recorded
+                                 // without that consent step.
 }
 
 enum VideoPdSessionStatus {
@@ -164,6 +170,7 @@ model LoanApplication {
   evidence      UploadedEvidence[]
   transcripts   ChatTurn[]
   lead          Lead?
+  voiceBiometricCheck VoiceBiometricCheck?
 }
 
 // FSD Section 13 — "Uploaded Evidence"
@@ -352,6 +359,131 @@ model VideoPdAnswer {
   @@unique([sessionId, questionKey]) // re-answering (e.g. borrower goes back a step) upserts in place rather than duplicating
 }
 
+// Voice biometrics — cross-checks the two guided-flow VideoPD recordings
+// (VIDEOPD_LIVENESS selfie-step vs. VIDEOPD_BUSINESS_VERIFICATION) against
+// each other via a separate Python microservice (see voice-service/README.md
+// for what it is and its honest limitations). Staff-triggered, not run
+// automatically on upload — the service is a separate process that may not
+// be running in every environment, and this whole feature is genuinely
+// unvalidated against real borrower audio (see voice-service/README.md
+// "Calibration"), so it stays an opt-in check rather than something that
+// silently blocks or gates the borrower-facing flow.
+model VoiceBiometricCheck {
+  id            String   @id @default(cuid())
+  applicationId String   @unique
+  application   LoanApplication @relation(fields: [applicationId], references: [id])
+
+  // /voice-consistency result — same voice across both recordings?
+  consistencyStatus     EvidenceCheckStatus @default(PENDING)
+  consistencySimilarity Float?
+  consistencyMethod     String?  // "ecapa-tdnn" | "resemblyzer-fallback"
+  consistencyNotes      String?
+
+  // /multi-speaker result, one run per clip — more than one voice present?
+  livenessMultiSpeakerStatus EvidenceCheckStatus @default(PENDING)
+  livenessSpeakerCount       Int?
+  businessMultiSpeakerStatus EvidenceCheckStatus @default(PENDING)
+  businessSpeakerCount       Int?
+
+  // Tier 1 live-call analysis (see LIVE_CALL_RECORDING evidence type,
+  // LiveCallRoom's recordForVoiceCheck prop) — same two checks, run against
+  // the borrower-side call recording instead of the guided-flow clips.
+  // Kept as separate fields/flag codes from the ones above rather than
+  // overwriting them: they're checking different things (the live call vs.
+  // the async guided-flow steps) and an underwriter should be able to tell
+  // which is which.
+  liveCallConsistencyStatus     EvidenceCheckStatus @default(PENDING)
+  liveCallConsistencySimilarity Float?
+  liveCallConsistencyMethod     String?
+  liveCallConsistencyNotes      String?
+  liveCallMultiSpeakerStatus    EvidenceCheckStatus @default(PENDING)
+  liveCallSpeakerCount          Int?
+
+  // /deepfake-check result, one run per guided-flow clip — frame-level
+  // face-manipulation image classifier (see voice-service/README.md's
+  // "Deepfake/lip-sync" section for exactly what this is/isn't). No
+  // live-call field: LIVE_CALL_RECORDING is deliberately audio-only (see
+  // useCallAudioRecorder.ts), so there's no video to run this against.
+  // Gated behind FeatureSettings.deepfakeCheckEnabled — see
+  // src/lib/featureSettings.ts.
+  livenessDeepfakeStatus  EvidenceCheckStatus @default(PENDING)
+  livenessDeepfakeRatio   Float?
+  businessDeepfakeStatus  EvidenceCheckStatus @default(PENDING)
+  businessDeepfakeRatio   Float?
+  deepfakeModel           String?
+
+  // /lip-sync-check result, one run per guided-flow clip — LipForensics
+  // (MIT-licensed, CVPR 2021) forgery score from real lip-region temporal
+  // analysis. Same "no live-call field" reasoning as deepfake above. Gated
+  // behind FeatureSettings.lipSyncCheckEnabled.
+  livenessLipSyncStatus  EvidenceCheckStatus @default(PENDING)
+  livenessLipSyncScore   Float?
+  businessLipSyncStatus  EvidenceCheckStatus @default(PENDING)
+  businessLipSyncScore   Float?
+  lipSyncModel           String?
+
+  // /asset-detection-check result — Phase 1 of the customer-requested
+  // "AI asset scoring" ask (see the feasibility note this was scoped
+  // from). Runs ONLY against VIDEOPD_BUSINESS_VERIFICATION (the
+  // work-premises video) — a real, general-purpose object detector
+  // (RT-DETR, COCO-pretrained — swapped from torchvision's Faster R-CNN
+  // after real testing showed it faster and less prone to false
+  // positives on this app's own footage) producing a checklist of
+  // generic categories detected — see voice-service/asset_detection.py's
+  // own doc comment for the full honest scope. No liveness-clip
+  // counterpart: the selfie-step recording isn't a premises video,
+  // nothing to detect assets in. Gated behind
+  // FeatureSettings.assetDetectionCheckEnabled.
+  assetDetectionStatus         EvidenceCheckStatus @default(PENDING)
+  assetDetectionChecklistJson  String? // JSON array: [{ label: string, count: number, confidence: number }], sorted by count desc
+  assetDetectionModel          String?
+  assetDetectionNotes          String?
+  // /custom-asset-detection-check result — the direct answer to "we're
+  // still only using COCO categories, not the segment-specific custom
+  // objects": an OPEN-VOCABULARY/zero-shot detector (OWLv2, see
+  // voice-service/custom_asset_detection.py), queried at inference time
+  // with this segment's manual-item list
+  // (AssetDetectionSegmentSettings.manualItemsJson) — genuinely different
+  // from assetDetectionStatus above, which can only ever output one of a
+  // fixed 80 categories. Real detection, not a training-based guess, but
+  // zero-shot accuracy runs meaningfully below a closed-vocabulary
+  // detector and this has never been benchmarked against real Indian
+  // premises footage — surfaced to the underwriter as a suggestion,
+  // pre-filling assetChecklistManualTicksJson below rather than replacing
+  // the human tick outright. Same business-verification-clip-only scope
+  // as assetDetectionStatus.
+  customAssetDetectionStatus        EvidenceCheckStatus @default(PENDING)
+  customAssetDetectionChecklistJson String? // JSON array: [{ label: string, count: number, confidence: number }]
+  customAssetDetectionModel         String?
+  customAssetDetectionNotes         String?
+  // Which of this segment's manual reference items
+  // (AssetDetectionSegmentSettings.manualItemsJson) the underwriter has
+  // confirmed — JSON array of label strings, editable any time on the
+  // case page, independent of when any AI check last ran. Pre-filled from
+  // customAssetDetectionChecklistJson's high-confidence hits when a fresh
+  // check runs (see runVoiceCheck.ts), but always a human-owned field
+  // from that point on — the underwriter can add or remove any item,
+  // AI-suggested or not, and it stays exactly as they left it.
+  assetChecklistManualTicksJson String?
+  // Weighted total over the AI-detected checklist (COCO), the zero-shot
+  // custom-detected checklist, AND the manually-ticked items together —
+  // AssetDetectionSegmentSettings.weightsJson applied to whichever labels
+  // are present across all three, deduped once per distinct label.
+  // Recomputed whenever any input changes (a fresh AI run of either kind,
+  // or the underwriter editing manual ticks) — see
+  // computeAssetChecklistScore in src/lib/assetDetectionSegmentSettings.ts.
+  // An admin-configured rubric total, NOT an outcome-calibrated
+  // valuation — that still needs Lakshya's real loan-performance data
+  // (Phase 2, unchanged). Stated explicitly wherever this number is
+  // shown, same honesty standard as every other score-shaped number in
+  // this codebase.
+  assetChecklistScore Float?
+
+  checkedAt  DateTime?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
 // Bank statement upload + local extraction (this conversation's explicit ask:
 // ICR/local extraction rather than a paid statement-analyzer service like
 // Perfios). See lib/bankStatement.ts for the extraction/eligibility pipeline.
@@ -440,6 +572,160 @@ model RiskParameters {
   maxEmiToIncomeRatioPct        Float    @default(50)    // FOIR-style affordability cap: estimated EMI / stated monthly income
   updatedBy                     String?
   updatedAt                     DateTime @updatedAt
+}
+
+// Which of the 80 COCO categories (src/lib/assetDetectionCategories.ts)
+// the work-premises asset checklist is allowed to surface, per segment —
+// requested live: what's worth listing genuinely differs by segment (a
+// farmer's premises checklist cares about things like "cow"/"truck", a
+// vocational student's about "laptop"/"book"/"chair"). Same
+// id-is-the-segment-value, one-row-per-segment pattern as RiskParameters
+// above, and deliberately its OWN model rather than bolted onto either:
+// not RiskParameters, a different kind of thing (scoring inputs, not
+// detection scope); not FeatureSettings, which is explicitly app-wide, not
+// per-segment (see that model's own doc comment). The on/off switch for
+// the check itself (FeatureSettings.assetDetectionCheckEnabled) stays
+// global — this only controls WHICH categories a segment's checklist may
+// list once the check is on. A segment's row is seeded on first touch
+// with that segment's curated starting list
+// (ASSET_DETECTION_DEFAULT_CATEGORIES_BY_SEGMENT in
+// assetDetectionCategories.ts), NOT "all 80" — see that constant's own
+// doc comment for why. categoriesJson only reads as NULL if something
+// external cleared it; every reader still treats that defensively as "all
+// categories" rather than erroring.
+//
+// This is the LIVE, currently-in-effect configuration — edited only
+// through maker-checker (/staff/asset-scorecard, AssetScorecardRevision
+// below), never by a direct save. The one exception is
+// addApprovedCategory, which already goes through its own separate
+// Approver sign-off (AssetDetectionCategoryRequest).
+model AssetDetectionSegmentSettings {
+  segment        String   @id // one of the Segment enum's values
+  categoriesJson String?
+  // Per-label point value for this segment's weighted checklist score —
+  // JSON object {label: number}, covering BOTH AI-detected COCO labels
+  // (categoriesJson above) and this segment's manual reference items
+  // (manualItemsJson below), same keyspace either way. Missing key = not
+  // yet configured, treated as weight 0 (contributes nothing) rather than
+  // erroring. Requested live, in-house-owned (no Lakshya dependency) —
+  // see computeAssetChecklistScore's own doc comment for exactly what
+  // this score is and, more importantly, what it ISN'T: an admin-set
+  // rubric, not an outcome-calibrated valuation. That still needs
+  // Lakshya's real loan-performance data (Phase 2, unchanged).
+  weightsJson String?
+  // Curated, India-relevant workshop/institute/farm equipment names for
+  // this segment that the detector can NEVER recognize (torchvision's
+  // COCO-pretrained model has a fixed 80-category vocabulary — see
+  // AssetDetectionCategoryRequest's doc comment) — sewing machine, lathe,
+  // power tiller, irrigation pump, and similar. JSON array of label
+  // strings. Surfaced to the underwriter as manual checkboxes on the case
+  // page (VoiceBiometricCheck.assetChecklistManualTicksJson) — a human
+  // visually confirms presence, the system doesn't. Seeded from domain
+  // knowledge, not scraped/trained on images — no licensing exposure,
+  // because no image ever backs one of these entries.
+  manualItemsJson String?
+  updatedBy      String?
+  updatedAt      DateTime @updatedAt
+}
+
+// Underwriter-proposed additions to a segment's asset-detection category
+// list, subject to Approver sign-off — requested live ("add new object
+// names if required, added by underwriter and approved by approver").
+//
+// IMPORTANT, and stated everywhere this surfaces in the UI: approving a
+// request here does NOT teach the detector a new category. The underlying
+// model (RT-DETR, COCO-pretrained — see voice-service/asset_detection.py)
+// has a fixed, closed vocabulary of 80 categories; it can never output a
+// label outside that set no matter what gets approved here. Recognizing
+// a genuinely new object type (a sewing
+// machine, an irrigation pump) needs a fine-tuned or different model,
+// which needs Lakshya's own labeled data first (Phase 2 — see the
+// feasibility note this whole feature was scoped from). What this table
+// actually is: a governance trail of what underwriters wish the checklist
+// covered, for whoever scopes Phase 2 to read — not a live capability
+// toggle. An approved request still gets added to that segment's
+// AssetDetectionSegmentSettings.categoriesJson allow-list (so a future
+// model swap that DOES recognize the label doesn't need this step
+// redone), but until then, approving one changes nothing about what a
+// check run can actually detect.
+model AssetDetectionCategoryRequest {
+  id          String                @id @default(cuid())
+  segment     Segment
+  label       String // free-text requested object name, e.g. "sewing machine"
+  requestedBy String
+  note        String?
+  status      CategoryRequestStatus @default(PENDING)
+  decidedBy   String?
+  decidedAt   DateTime?
+  createdAt   DateTime              @default(now())
+}
+
+enum CategoryRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+// Maker-checker revision for a segment's WHOLE asset scorecard
+// (categories + weights + manual items together, one edit session — see
+// /staff/asset-scorecard) — requested live: bulk scorecard edits should
+// go through the same propose/approve separation as an individual
+// category request, not a direct save. A staff member (any role) PROPOSES
+// a full replacement snapshot; a DIFFERENT Approver must decide it before
+// it becomes live — decideAssetScorecardRevision (src/lib/
+// assetScorecardRevisions.ts) rejects a decidedBy equal to proposedBy,
+// enforcing genuine four-eyes review, not just an Approver-role check.
+// AssetDetectionSegmentSettings only ever gets overwritten by an
+// APPROVED revision here — never by a direct PUT from the config page
+// itself, which is what makes this a real maker-checker flow rather than
+// "Approver edits it themselves."
+model AssetScorecardRevision {
+  id              String                @id @default(cuid())
+  segment         Segment
+  categoriesJson  String // full proposed AI-category allow-list, same shape as AssetDetectionSegmentSettings.categoriesJson
+  weightsJson     String // full proposed {label: weight} map
+  manualItemsJson String // full proposed manual-item list
+  proposedBy      String
+  note            String?
+  status          CategoryRequestStatus @default(PENDING)
+  decidedBy       String?
+  decidedAt       DateTime?
+  createdAt       DateTime              @default(now())
+}
+
+// Global on/off switch for experimental checks — requested live: deepfake
+// detection explicitly needed to be admin-toggleable so it can be turned
+// off later without an engineering change, given it's genuinely research-
+// grade (see voice-service/README.md's "Deepfake/lip-sync" section for
+// exactly what that means and why, including why lip-sync itself isn't
+// shipped here — a real, hands-on-verified blocker, not a skipped attempt).
+// Singleton row (id="global"), same staff-editable pattern as
+// RiskParameters above, just a boolean instead of numbers — deliberately a
+// separate model rather than bolted onto RiskParameters, since this isn't
+// an underwriting-policy number and applies app-wide, not per-segment.
+model FeatureSettings {
+  id                     String   @id @default("global")
+  deepfakeCheckEnabled   Boolean  @default(true)
+  lipSyncCheckEnabled    Boolean  @default(true)
+  // Phase 1 work-premises asset-detection checklist (see
+  // VoiceBiometricCheck.assetDetectionStatus and
+  // voice-service/asset_detection.py) — its own toggle, same reasoning as
+  // the two above: a real but genuinely limited capability (generic COCO
+  // categories, not domain-specific assets), staff should be able to turn
+  // it off without an engineering change if it turns out to be more noise
+  // than signal for a given lending partner.
+  assetDetectionCheckEnabled Boolean @default(true)
+  // How many days a DRAFT application still counts as "in progress" for the
+  // duplicate-application check on the landing page (api/application/
+  // duplicate-check/route.ts) — global, not per-segment, same reasoning as
+  // the two toggles above: this is a platform behavior, not an
+  // underwriting-policy number like RiskParameters. Past this many days
+  // since the draft's own lastActiveAt, it stops blocking/offering a
+  // resume prompt and a fresh application can start normally; the stale
+  // draft itself is left alone, not deleted or auto-marked EXPIRED.
+  applicationExpiryDays  Int      @default(30)
+  updatedBy              String?
+  updatedAt              DateTime @updatedAt
 }
 
 // Mock OTP store — dev-mode only stand-in for the SMS gateway (BRD Dependencies)

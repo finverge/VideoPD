@@ -1,9 +1,9 @@
 "use client";
 
-import { useState, useRef } from "react";
+import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
-import { ArrowRight, Loader2, Phone, ShieldCheck } from "lucide-react";
+import { AlertTriangle, ArrowRight, Loader2, Phone, ShieldCheck } from "lucide-react";
 import { LanguageSelector } from "@/components/LanguageSelector";
 import { SegmentCard } from "@/components/SegmentCard";
 import { BrandHeader } from "@/components/BrandHeader";
@@ -15,6 +15,23 @@ import { t } from "@/lib/i18n";
 import type { LangCode, SegmentCode } from "@/types";
 
 type OnboardStep = "language" | "segment" | "mobile" | "otp";
+
+// Plain segment nouns for the duplicate-application messages below — the
+// segmentFarmer/segmentStudent/segmentBusiness keys used by the segment
+// picker are first-person self-descriptions ("I'm a Farmer") that read
+// wrong mid-sentence ("in progress in I'm a Farmer"). Same keys the
+// duplicate-check API route uses server-side for the OTHER segment's name;
+// this is just the client-side half, for the segment the borrower just
+// picked on this page.
+const SEGMENT_NAME_KEY: Record<SegmentCode, string> = {
+  FARMER: "segmentNameFarmer",
+  VOCATIONAL_STUDENT: "segmentNameStudent",
+  BUSINESS_OWNER: "segmentNameBusiness",
+};
+
+type DuplicateConflict =
+  | { type: "different-segment"; applicationId: string; existingSegment: SegmentCode; existingSegmentLabel: string }
+  | { type: "resume-same-segment"; applicationId: string; fullName: string | null };
 
 export default function LandingPage() {
   const router = useRouter();
@@ -28,6 +45,24 @@ export default function LandingPage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const otpRef = useRef<HTMLInputElement>(null);
+  // Set once OTP verifies but a duplicate-application conflict needs the
+  // borrower's own Yes/No before continuing — see verifyOtp/resolveConflict
+  // below and api/application/duplicate-check/route.ts for what this is
+  // checking and why.
+  const [duplicateConflict, setDuplicateConflict] = useState<DuplicateConflict | null>(null);
+  const [resolving, setResolving] = useState(false);
+
+  // Reported live: picking a segment required scrolling down to a separate
+  // "Continue" button below the cards — an extra, pointless step once
+  // there's nothing left to decide on this screen. Tapping a card is
+  // already an unambiguous, complete choice; advances on its own a beat
+  // later rather than instantly, so the borrower still sees the card
+  // highlight as selected before the screen moves on, instead of it
+  // vanishing out from under their tap.
+  function selectSegment(code: SegmentCode) {
+    setSegment(code);
+    setTimeout(() => setStep("mobile"), 250);
+  }
 
   async function sendOtp() {
     setError(null);
@@ -55,6 +90,23 @@ export default function LandingPage() {
     }
   }
 
+  // Creates-or-resumes (POST /api/application already scopes its own
+  // lookup to this exact segment — see that route's own comment) and
+  // navigates in. Shared by the plain no-conflict path below and by
+  // resolveConflict's "yes, start a new one in the other segment" branch.
+  async function proceedToApplication(forBorrowerId: string) {
+    const appRes = await fetch("/api/application", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ borrowerId: forBorrowerId, segment }),
+    });
+    const appData = await appRes.json();
+    if (!appRes.ok) throw new Error(appData.error);
+    localStorage.setItem("finverge_borrower_id", forBorrowerId);
+    localStorage.setItem("finverge_lang", lang);
+    router.push(`/apply/${appData.application.id}?lang=${lang}`);
+  }
+
   async function verifyOtp() {
     setError(null);
     setLoading(true);
@@ -66,22 +118,61 @@ export default function LandingPage() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
+      setBorrowerId(data.borrowerId);
 
-      const appRes = await fetch("/api/application", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ borrowerId: data.borrowerId, segment }),
-      });
-      const appData = await appRes.json();
-      if (!appRes.ok) throw new Error(appData.error);
+      // Before starting or resuming anything, check whether this borrower
+      // already has an application in progress — see
+      // api/application/duplicate-check/route.ts for exactly what this
+      // catches and why (a different-segment draft used to get silently
+      // overwritten; a same-segment draft used to resume with zero
+      // confirmation). Pauses here if there's something worth asking about;
+      // the dialog below decides what happens next.
+      const checkRes = await fetch(
+        `/api/application/duplicate-check?borrowerId=${data.borrowerId}&segment=${segment}&lang=${lang}`
+      );
+      const checkData = await checkRes.json();
+      if (checkData.conflict) {
+        setDuplicateConflict(checkData.conflict);
+        return;
+      }
 
-      localStorage.setItem("finverge_borrower_id", data.borrowerId);
-      localStorage.setItem("finverge_lang", lang);
-      router.push(`/apply/${appData.application.id}?lang=${lang}`);
+      await proceedToApplication(data.borrowerId);
     } catch (e: any) {
       setError(e.message ?? "Incorrect code.");
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function resolveConflict(proceed: boolean) {
+    if (!duplicateConflict) return;
+    if (!proceed) {
+      // "Stop the journey" — don't create or resume anything. Back to the
+      // mobile step so there's a clear next action (try a different
+      // number, or reconsider) rather than a dead end.
+      setDuplicateConflict(null);
+      setOtp("");
+      setStep("mobile");
+      return;
+    }
+    setResolving(true);
+    setError(null);
+    try {
+      if (duplicateConflict.type === "resume-same-segment") {
+        // Resuming an existing draft — nothing new to create, go straight there.
+        if (!borrowerId) throw new Error("Something went wrong — please try again.");
+        localStorage.setItem("finverge_borrower_id", borrowerId);
+        localStorage.setItem("finverge_lang", lang);
+        router.push(`/apply/${duplicateConflict.applicationId}?lang=${lang}`);
+      } else {
+        if (!borrowerId) throw new Error("Something went wrong — please try again.");
+        await proceedToApplication(borrowerId);
+      }
+    } catch (e: any) {
+      setError(e.message ?? "Something went wrong.");
+      setDuplicateConflict(null);
+    } finally {
+      setResolving(false);
     }
   }
 
@@ -149,23 +240,14 @@ export default function LandingPage() {
                       title={t(lang, s.titleKey)}
                       subtitle={t(lang, s.subKey)}
                       active={segment === s.code}
-                      onClick={() => setSegment(s.code)}
+                      onClick={() => selectSegment(s.code)}
                       index={i}
                     />
                   ))}
                 </div>
-                <div className="mt-8 flex gap-3">
+                <div className="mt-8">
                   <Button variant="ghost" onClick={() => setStep("language")}>
                     {t(lang, "back")}
-                  </Button>
-                  <Button
-                    className="flex-1"
-                    size="lg"
-                    disabled={!segment}
-                    onClick={() => setStep("mobile")}
-                    icon={<ArrowRight className="h-4 w-4" />}
-                  >
-                    {t(lang, "continue")}
                   </Button>
                 </div>
               </motion.section>
@@ -267,6 +349,56 @@ export default function LandingPage() {
       <a href="/staff" className="mt-10 self-center text-[11px] font-medium text-ink-300 hover:text-ink-500 dark:text-ink-600 dark:hover:text-ink-400">
         Staff sign-in
       </a>
+
+      <AnimatePresence>
+        {duplicateConflict && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-5"
+          >
+            <motion.div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="duplicate-conflict-title"
+              initial={{ opacity: 0, y: 12, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 12, scale: 0.98 }}
+              transition={{ type: "spring", damping: 26, stiffness: 320 }}
+              className="w-full max-w-sm rounded-3xl border border-ink-100 bg-white p-6 shadow-soft dark:border-ink-800 dark:bg-ink-900"
+            >
+              <div className="mb-4 flex h-11 w-11 items-center justify-center rounded-2xl bg-amber-100 text-amber-600 dark:bg-amber-900/40 dark:text-amber-400">
+                <AlertTriangle className="h-5 w-5" />
+              </div>
+              <h2 id="duplicate-conflict-title" className="mb-1.5 text-lg font-extrabold tracking-tight text-ink-900 dark:text-white">
+                {duplicateConflict.type === "different-segment"
+                  ? t(lang, "duplicateDifferentSegmentTitle")
+                  : t(lang, "duplicateSameSegmentTitle")}
+              </h2>
+              <p className="mb-6 text-sm text-ink-500 dark:text-ink-400">
+                {duplicateConflict.type === "different-segment"
+                  ? t(lang, "duplicateDifferentSegmentBody", {
+                      existingSegment: duplicateConflict.existingSegmentLabel,
+                      newSegment: segment ? t(lang, SEGMENT_NAME_KEY[segment]) : "",
+                    })
+                  : t(lang, "duplicateSameSegmentBody")}
+              </p>
+              {error && (
+                <p className="mb-4 text-xs font-medium text-red-500">{error}</p>
+              )}
+              <div className="flex gap-3">
+                <Button variant="ghost" className="flex-1" disabled={resolving} onClick={() => resolveConflict(false)}>
+                  {t(lang, "duplicateNo")}
+                </Button>
+                <Button className="flex-1" loading={resolving} onClick={() => resolveConflict(true)}>
+                  {t(lang, "duplicateYes")}
+                </Button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </main>
   );
 }

@@ -15,19 +15,26 @@ export async function POST(req: NextRequest) {
 
   await db.borrower.update({ where: { id: borrowerId }, data: { segment } });
 
+  // Scoped to THIS segment specifically — used to also grab a borrower's
+  // latest draft in ANY segment and silently switch it to whatever segment
+  // was just picked, clobbering an in-progress application in a different
+  // segment with zero warning (reported live, fixed by adding the
+  // duplicate-check the landing page now calls first — see
+  // api/application/duplicate-check/route.ts). Scoping the lookup by
+  // segment here means this route no longer needs to choose between
+  // "reuse" and "overwrite" itself: a same-segment draft resumes exactly
+  // like before, a different-segment draft is simply invisible to this
+  // query and a genuinely new, separate application gets created instead —
+  // the landing page has already asked the borrower about that by the
+  // time this is called.
   let application = await db.loanApplication.findFirst({
-    where: { borrowerId, status: "DRAFT" },
+    where: { borrowerId, status: "DRAFT", segment },
     orderBy: { updatedAt: "desc" },
   });
 
   if (!application) {
     application = await db.loanApplication.create({
       data: { borrowerId, segment, status: "DRAFT" },
-    });
-  } else if (application.segment !== segment) {
-    application = await db.loanApplication.update({
-      where: { id: application.id },
-      data: { segment },
     });
   }
 

@@ -54,10 +54,28 @@ const NO_WORDS = [
 // non-English choice label match in extractFieldValue, was silently
 // unmatchable regardless of position. Splitting on "anything that isn't a
 // Unicode letter or number" (\p{L}/\p{N} with the u flag) sidesteps \w
-// entirely and works for any of the six launch languages, all of which are
-// space-separated scripts.
+// entirely.
+//
+// That \p{L}/\p{N} fix turned out to be only half right, and the second
+// half was far worse — confirmed in a real multi-language end-to-end test
+// run: EVERY Devanagari/Telugu/Tamil/Kannada/Malayalam word that uses a
+// combining vowel sign (a matra — extremely common; these are all abugida
+// scripts where a vowel attached to a consonant is usually written as a
+// mark on that consonant, not its own letter) was getting silently
+// shredded. A combining mark's Unicode category is Mn ("Mark, nonspacing")
+// or Mc ("Mark, spacing combining") — neither is \p{L} or \p{N} — so the
+// old regex split ON it, throwing the vowel sign away entirely: "दो" ("two"
+// — द + a ो matra) tokenized to just "द", and "मेरे" ("my" — मे + रे, two
+// matra-bearing syllables) fell apart into "म" and "र". This wasn't a
+// partial gap either — it silently broke almost every real word in these
+// five scripts, not just edge cases, so it's exactly the kind of thing an
+// isolated unit test of one hand-picked "clean" phrase could pass while
+// real sentences failed constantly. \p{M} is the umbrella Unicode category
+// for exactly these combining marks (Mn + Mc + Me); including it in the
+// "keep, don't split" set is what makes tokenize() actually word-aware for
+// these scripts rather than just script-aware.
 function tokenize(text: string): string[] {
-  return text.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  return text.toLowerCase().split(/[^\p{L}\p{N}\p{M}]+/u).filter(Boolean);
 }
 
 // True if `phrase`'s own tokens appear as a contiguous run inside `tokens`
@@ -184,17 +202,46 @@ const MULTIPLIER_WORDS: Record<LangCode, { words: string[]; value: number }[]> =
   ],
   te: [
     { words: ["కోట్లు", "కోటి"], value: 10000000 },
-    { words: ["లక్షలు", "లక్ష"], value: 100000 },
+    // "లక్షల" (the oblique/genitive-ish form used right before a following
+    // number, "...lakh(s)-of...") added alongside "లక్ష"/"లక్షలు" — confirmed
+    // needed live, and confirms something important about the earlier fix
+    // in parseAmountWithMultipliers requiring a real word boundary after
+    // the matched word: before that fix, "లక్ష" silently matched as a
+    // substring PREFIX of "లక్షల" too, and happened to still total
+    // correctly here purely because this particular suffix is a case
+    // marker that doesn't change the multiplier's value — not because the
+    // old matching was actually correct. It was the same unsafe mechanism
+    // that produced a genuinely wrong total for Malayalam's combining form
+    // in the same test run, just luckier here. Adding the real word is the
+    // honest fix; relying on the coincidence would leave a landmine for
+    // the next inflected form that ISN'T value-preserving.
+    { words: ["లక్షలు", "లక్షల", "లక్ష"], value: 100000 },
     { words: ["వేలు", "వేల"], value: 1000 },
   ],
   ta: [
     { words: ["கோடி"], value: 10000000 },
+    // Deliberately NOT adding "லட்சத்து" (the combining form confirmed live
+    // right before a following number, e.g. "இரண்டு லட்சத்து ஐம்பதாயிரம்" —
+    // "two lakh fifty thousand") even though it's a real word: unlike
+    // Telugu's "లక్షల" above, the number that follows it in real usage is
+    // itself commonly a single FUSED compound word ("ஐம்பதாயிரம்" =
+    // "fifty-thousand" as one token, not "50" + "ஆயிரம்"), which this
+    // parser has no way to decompose. Adding just the combining form would
+    // make the multiplier match "succeed" on the lakh portion alone and
+    // silently drop the fused thousand portion — a real ₹2,50,000 becoming
+    // a wrong-but-confident ₹2,00,000, the exact bug just fixed for
+    // Malayalam's identical pattern. Safer to leave this an honest failure
+    // (containsMultiplierHint still catches "லட்ச" as a hint and blocks the
+    // bare-digit fallback too) until the fused-compound-number problem
+    // itself has a real solution.
     { words: ["இலட்சம்", "லட்சம்"], value: 100000 },
     { words: ["ஆயிரம்"], value: 1000 },
   ],
   kn: [
     { words: ["ಕೋಟಿ"], value: 10000000 },
-    { words: ["ಲಕ್ಷ"], value: 100000 },
+    // "ಲಕ್ಷದ" — same oblique/genitive-form reasoning as Telugu's "లక్షల"
+    // above, confirmed needed by the same live test.
+    { words: ["ಲಕ್ಷ", "ಲಕ್ಷದ"], value: 100000 },
     { words: ["ಸಾವಿರ"], value: 1000 },
   ],
   ml: [
@@ -206,6 +253,207 @@ const MULTIPLIER_WORDS: Record<LangCode, { words: string[]; value: number }[]> =
 
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// Spelled-out number words, for small "number" fields (years in operation,
+// number of employees, dependents...) where a borrower's spoken or typed
+// answer is far more likely to be a word than a digit for anything under
+// ten. Confirmed a real, reproducible failure live: "Zero years.", "Yeah,
+// one year." etc. all failed outright — the number branch below only ever
+// looked for a literal digit character.
+//
+// Confirmed the identical failure in a real end-to-end test run across all
+// five non-English launch languages too ("मेरे दो बच्चे हैं" / "నాకు ఇద్దరు
+// పిల్లలు ఉన్నారు" / "எனக்கு இரண்டு குழந்தைகள் உள்ளன" / "ನನಗೆ ಇಬ್ಬರು
+// ಮಕ್ಕಳಿದ್ದಾರೆ" / "എനിക്ക് രണ്ട് കുട്ടികളുണ്ട്" — all "I have two children"
+// — every one of them failed the same way English did before this fix) —
+// so this covers all six languages, not just English.
+//
+// Deliberately NOT a complete 0-99 table for every language: Hindi's
+// 21-99 range is mostly unique irregular words per number (not a clean
+// "twenty" + "five" compound the way English or the four Dravidian
+// languages here are), and hand-typing ~80 more irregular words per
+// language without native-speaker verification risked shipping wrong
+// vocabulary silently accepted as correct — worse than the honest "doesn't
+// match, re-asks" failure this whole file otherwise prefers. Each
+// language's `ones` covers 0-19 plus (for the four languages that actually
+// compound tens+ones regularly) `tens` for the round tens 20-90, with
+// `compounds: true` enabling the same "tens ones" -> tens+ones logic
+// English uses. Hindi's tens are listed as their own words with `compounds:
+// false` (correct as bare round numbers — 20, 30, 40... — but 21-99
+// in between stay an honest, documented gap). Also includes common
+// PERSON-COUNTING classifier forms (Telugu "ఇద్దరు", Kannada "ಇಬ್ಬರು" for
+// "two people") alongside the bare numeral, since "how many dependents" is
+// exactly the kind of question that elicits them in natural speech —
+// confirmed live in the same test run.
+//
+// None of this vocabulary has been checked by a native speaker of each
+// language — same caveat this codebase's own i18n.ts translations already
+// carry (docs/videopd-future-work.md's "translations need a native-speaker
+// QA pass" item applies here too). Extend/correct per-language as that
+// review happens.
+interface NumberWordConfig {
+  ones: Record<string, number>;
+  tens: Record<string, number>;
+  compounds: boolean;
+}
+const NUMBER_WORDS: Record<LangCode, NumberWordConfig> = {
+  en: {
+    ones: {
+      zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9,
+      ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15,
+      sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19,
+    },
+    tens: { twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 },
+    compounds: true,
+  },
+  hi: {
+    ones: {
+      "शून्य": 0, "एक": 1, "दो": 2, "तीन": 3, "चार": 4, "पांच": 5, "पाँच": 5, "छह": 6, "छः": 6,
+      "सात": 7, "आठ": 8, "नौ": 9, "दस": 10, "ग्यारह": 11, "बारह": 12, "तेरह": 13, "चौदह": 14,
+      "पंद्रह": 15, "सोलह": 16, "सत्रह": 17, "अठारह": 18, "उन्नीस": 19,
+    },
+    // Round tens only — not compounded with ones (21-99 are mostly their
+    // own irregular words in Hindi, not "बीस" + "एक"; see doc comment above).
+    tens: { "बीस": 20, "तीस": 30, "चालीस": 40, "पचास": 50, "साठ": 60, "सत्तर": 70, "अस्सी": 80, "नब्बे": 90 },
+    compounds: false,
+  },
+  te: {
+    ones: {
+      "సున్నా": 0, "ఒకటి": 1, "రెండు": 2, "ఇద్దరు": 2, "మూడు": 3, "నాలుగు": 4, "ఐదు": 5, "ఆరు": 6,
+      "ఏడు": 7, "ఎనిమిది": 8, "తొమ్మిది": 9, "పది": 10, "పదకొండు": 11, "పన్నెండు": 12, "పదమూడు": 13,
+      "పద్నాలుగు": 14, "పదిహేను": 15, "పదహారు": 16, "పదిహేడు": 17, "పద్దెనిమిది": 18, "పంతొమ్మిది": 19,
+    },
+    tens: { "ఇరవై": 20, "ముప్పై": 30, "నలభై": 40, "యాభై": 50, "అరవై": 60, "డెబ్బై": 70, "ఎనభై": 80, "తొంభై": 90 },
+    compounds: true,
+  },
+  ta: {
+    ones: {
+      "பூஜ்ஜியம்": 0, "ஒன்று": 1, "இரண்டு": 2, "மூன்று": 3, "நான்கு": 4, "ஐந்து": 5, "ஆறு": 6,
+      "ஏழு": 7, "எட்டு": 8, "ஒன்பது": 9, "பத்து": 10, "பதினொன்று": 11, "பன்னிரண்டு": 12,
+      "பதின்மூன்று": 13, "பதினான்கு": 14, "பதினைந்து": 15, "பதினாறு": 16, "பதினேழு": 17,
+      "பதினெட்டு": 18, "பத்தொன்பது": 19,
+    },
+    // Both the standalone form (இருபது, "twenty" on its own) AND the
+    // euphonic "combining" form Tamil actually uses right before a ones
+    // word (இருபத்து/இருபத்தி — roughly "twenty-of") are listed here,
+    // pointing to the same value. Confirmed a real, dangerous bug from
+    // only having the standalone form: fed "இருபத்தி நான்கு மாதங்கள்"
+    // ("twenty-four months"), wordsToDigits couldn't recognize
+    // "இருபத்தி" at all, left it as an ordinary word, converted only
+    // "நான்கு" (4) to a digit, and the bare-digit regex downstream then
+    // silently matched just that "4" — a loan tenure of 24 months would
+    // have been saved as 4, with no error, the same severity of bug as
+    // the "two lakh" -> "2" regression documented above, just triggered
+    // by a missing combining form instead of a missing normalization
+    // pass entirely.
+    tens: {
+      "இருபது": 20, "இருபத்து": 20, "இருபத்தி": 20,
+      "முப்பது": 30, "முப்பத்து": 30, "முப்பத்தி": 30,
+      "நாற்பது": 40, "நாற்பத்து": 40, "நாற்பத்தி": 40,
+      "ஐம்பது": 50, "ஐம்பத்து": 50, "ஐம்பத்தி": 50,
+      "அறுபது": 60, "அறுபத்து": 60, "அறுபத்தி": 60,
+      "எழுபது": 70, "எழுபத்து": 70, "எழுபத்தி": 70,
+      "எண்பது": 80, "எண்பத்து": 80, "எண்பத்தி": 80,
+      "தொண்ணூறு": 90, "தொண்ணூற்று": 90,
+    },
+    compounds: true,
+  },
+  kn: {
+    ones: {
+      "ಸೊನ್ನೆ": 0, "ಒಂದು": 1, "ಎರಡು": 2, "ಇಬ್ಬರು": 2, "ಮೂರು": 3, "ನಾಲ್ಕು": 4, "ಐದು": 5, "ಆರು": 6,
+      "ಏಳು": 7, "ಎಂಟು": 8, "ಒಂಬತ್ತು": 9, "ಹತ್ತು": 10, "ಹನ್ನೊಂದು": 11, "ಹನ್ನೆರಡು": 12,
+      "ಹದಿಮೂರು": 13, "ಹದಿನಾಲ್ಕು": 14, "ಹದಿನೈದು": 15, "ಹದಿನಾರು": 16, "ಹದಿನೇಳು": 17,
+      "ಹದಿನೆಂಟು": 18, "ಹತ್ತೊಂಬತ್ತು": 19,
+    },
+    tens: { "ಇಪ್ಪತ್ತು": 20, "ಮೂವತ್ತು": 30, "ನಲವತ್ತು": 40, "ಐವತ್ತು": 50, "ಅರವತ್ತು": 60, "ಎಪ್ಪತ್ತು": 70, "ಎಂಬತ್ತು": 80, "ತೊಂಬತ್ತು": 90 },
+    compounds: true,
+  },
+  ml: {
+    ones: {
+      "പൂജ്യം": 0, "ഒന്ന്": 1, "രണ്ട്": 2, "മൂന്ന്": 3, "നാല്": 4, "അഞ്ച്": 5, "ആറ്": 6,
+      "ഏഴ്": 7, "എട്ട്": 8, "ഒൻപത്": 9, "പത്ത്": 10, "പതിനൊന്ന്": 11, "പന്ത്രണ്ട്": 12,
+      "പതിമൂന്ന്": 13, "പതിനാല്": 14, "പതിനഞ്ച്": 15, "പതിനാറ്": 16, "പതിനേഴ്": 17,
+      "പതിനെട്ട്": 18, "പത്തൊൻപത്": 19,
+    },
+    tens: { "ഇരുപത്": 20, "മുപ്പത്": 30, "നാൽപത്": 40, "അമ്പത്": 50, "അറുപത്": 60, "എഴുപത്": 70, "എൺപത്": 80, "തൊണ്ണൂറ്": 90 },
+    compounds: true,
+  },
+};
+
+/** Rewrites every spelled-out number word (or, for the four languages that
+ * regularly compound them, a "tens ones" pair like "twenty five" /
+ * "ఇరవై నాలుగు") in `text` to its digit string, leaving everything else
+ * untouched — a normalization pass run BEFORE both the multiplier-word and
+ * bare-digit checks below, not a separate late fallback of its own.
+ *
+ * That ordering matters and was the site of a real bug caught in an actual
+ * end-to-end test run (not just unit-tested in isolation): an earlier
+ * version of this fix was a last-resort branch that ran *after*
+ * parseAmountWithMultipliers and just grabbed the first number word it
+ * found, with no idea a multiplier word came after it. Fed "two lakh fifty
+ * thousand rupees", it matched "two" and returned 2 — silently saving a
+ * requested loan amount of ₹2 for what should have been ₹2,50,000, with no
+ * error at all (worse than the pre-fix behavior, which at least failed
+ * safely and re-asked). Normalizing "two lakh fifty thousand" to
+ * "2 lakh 50 thousand" *first* and only then handing it to the existing
+ * digit-based multiplier parser fixes both the original gap and this
+ * regression in one pass, since the multiplier parser already handles
+ * "<digits> <word>" correctly — it just never saw digits when the borrower
+ * spelled the number out. Same reasoning applies per-language below.
+ */
+function wordsToDigits(text: string, lang: LangCode): string {
+  const config = NUMBER_WORDS[lang];
+  if (!config) return text;
+
+  // Word-boundary-safe, in-place regex replace on the ORIGINAL text — not a
+  // tokenize()-then-rejoin round trip like the previous version of this
+  // function used. That mattered: tokenize() splits on any run of
+  // non-letter/digit/mark characters, so it treats a comma or a period
+  // exactly like a space. Feeding an already-digit answer like "2,50,000."
+  // through tokenize+rejoin silently produced three separate tokens
+  // "2"/"50"/"000", rejoined with single spaces — the comma-grouping that
+  // made it one number was gone, and the bare-digit fallback downstream
+  // then only ever saw the first fragment, "2" (confirmed live, both typed
+  // and spoken: a ₹2,50,000 loan amount was silently saved as ₹2). Matching
+  // and replacing only the actual spelled-out number words in place leaves
+  // every digit, comma, period, and space elsewhere in the text completely
+  // untouched, so an already-numeric answer just passes through unchanged.
+  const byPhrase = new Map<string, number>();
+  const phrasePatterns: string[] = [];
+  for (const [tensWord, tensValue] of Object.entries(config.tens)) {
+    byPhrase.set(tensWord, tensValue);
+    phrasePatterns.push(escapeRegExp(tensWord));
+    if (config.compounds) {
+      for (const [onesWord, onesValue] of Object.entries(config.ones)) {
+        if (onesValue < 10) {
+          // \s+ (not a literal single space) between the two words — real
+          // transcribed/typed text doesn't always have exactly one space,
+          // and this still needs to out-compete the bare tens-word
+          // alternative below for "twenty five" to become one 25 rather
+          // than a stranded 20 + 5.
+          byPhrase.set(`${tensWord} ${onesWord}`, tensValue + onesValue);
+          phrasePatterns.push(`${escapeRegExp(tensWord)}\\s+${escapeRegExp(onesWord)}`);
+        }
+      }
+    }
+  }
+  for (const [onesWord, onesValue] of Object.entries(config.ones)) {
+    byPhrase.set(onesWord, onesValue);
+    phrasePatterns.push(escapeRegExp(onesWord));
+  }
+  if (phrasePatterns.length === 0) return text;
+
+  // Longest pattern first so a compound match is tried before the shorter
+  // bare tens-word alternative sitting right behind it in the alternation.
+  phrasePatterns.sort((a, b) => b.length - a.length);
+  const pattern = new RegExp(`(?<![\\p{L}\\p{N}\\p{M}])(${phrasePatterns.join("|")})(?![\\p{L}\\p{N}\\p{M}])`, "giu");
+
+  return text.replace(pattern, (match) => {
+    const key = match.toLowerCase().replace(/\s+/g, " ").trim();
+    const value = byPhrase.get(key);
+    return value !== undefined ? String(value) : match;
+  });
 }
 
 /** Sums every "<number> <multiplier-word>" occurrence, e.g. "2 lakh 50 thousand" -> 250000.
@@ -229,7 +477,22 @@ function parseAmountWithMultipliers(text: string, lang: LangCode): number | null
   const words = [...wordToMult.keys()].sort((a, b) => b.length - a.length);
   if (words.length === 0) return null;
 
-  const pattern = new RegExp(`([\\d.,]+)\\s*(${words.map(escapeRegExp).join("|")})`, "gi");
+  // Trailing boundary check — (?![\p{L}\p{M}]) — is required, not optional:
+  // confirmed live, a bare alternation with no boundary let "ലക്ഷ" (a real,
+  // deliberately-short dictionary entry — Malayalam's own short form of
+  // "lakh") match as a mid-word PREFIX of "ലക്ഷത്തി" ("lakh"'s combining
+  // form before a following number), inside "two lakh fifty thousand
+  // rupees" stated in Malayalam. That silently computed 2 × 100,000 =
+  // 200,000 and stopped — a real ₹2,50,000 loan amount saved as ₹2,00,000,
+  // wrong by ₹50,000 with no error at all, because the regex was satisfied
+  // by consuming only part of "ലക്ഷത്തി" and never noticed the rest of
+  // that word (or the separate, unrecognized "fifty-thousand" that
+  // followed) wasn't accounted for. A plain \b can't fix this the normal
+  // way — confirmed elsewhere in this file that \b doesn't exist at all
+  // relative to non-Latin scripts — so this uses the same \p{L}/\p{M}
+  // "what counts as part of a word" definition tokenize() already
+  // established, as a lookahead instead of a split.
+  const pattern = new RegExp(`([\\d.,]+)\\s*(${words.map(escapeRegExp).join("|")})(?![\\p{L}\\p{M}])`, "giu");
   let total = 0;
   let matchedAny = false;
   let m: RegExpExecArray | null;
@@ -242,6 +505,57 @@ function parseAmountWithMultipliers(text: string, lang: LangCode): number | null
     }
   }
   return matchedAny ? Math.round(total) : null;
+}
+
+/** True if `text` contains something that looks like it's trying to
+ * reference a lakh/crore/thousand-style multiplier word, even if it's not
+ * an exact match for any word in MULTIPLIER_WORDS — a combining/inflected
+ * form (Tamil "லட்சத்து" vs the dictionary's "லட்சம்"), or one fused into a
+ * larger compound word (Malayalam "അമ്പതിനായിരം" containing "ஆயிரம்" — sorry,
+ * containing "ആയിരം" — as a literal trailing substring). Checks a shortened
+ * "root" of each known word as a substring probe rather than requiring an
+ * exact token match, deliberately looser than parseAmountWithMultipliers.
+ *
+ * Exists specifically to gate the bare-digit fallback in the number branch
+ * below. Confirmed live, twice, in the same end-to-end multi-language test
+ * run: "இரண்டு லட்சத்து ஐம்பதாயிரம் ரூபாய்" ("two lakh fifty thousand
+ * rupees") — parseAmountWithMultipliers couldn't resolve either
+ * "லட்சத்து" (combining form, dictionary only has "லட்சம்") or
+ * "ஐம்பதாயிரம்" (a fully fused "fifty-thousand") — and with no guard, the
+ * bare-digit regex downstream just grabbed the leading "2" from "இரண்டு" ->
+ * 2, silently saving a stated ₹2,50,000 loan amount as ₹2. This is the
+ * same severity bug as the earlier documented "two lakh" -> "2" regression,
+ * just from a different missing vocabulary form — confirming this is a
+ * recurring failure shape (any language's multiplier vocabulary will always
+ * have combining/fused forms this file hasn't anticipated), not a one-off
+ * to patch by adding one more word. Better to safely fail (re-ask) whenever
+ * the text clearly seems to be describing a multiplied amount than to risk
+ * silently saving a wildly wrong one — same "honest failure over guessed
+ * answer" principle this whole file already follows everywhere else. */
+function containsMultiplierHint(text: string, lang: LangCode): boolean {
+  const groups = MULTIPLIER_WORDS[lang] ?? [];
+  const allGroups = lang === "en" ? groups : [...groups, ...MULTIPLIER_WORDS.en];
+  const lower = text.toLowerCase();
+  for (const g of allGroups) {
+    for (const w of g.words) {
+      const word = w.toLowerCase();
+      // Try progressively shorter roots (drop 1, then 2, then 3 trailing
+      // characters, never below 3 characters left) rather than a single
+      // fixed trim — confirmed necessary live: Tamil "லட்சம்" and its real
+      // combining form "லட்சத்து" only share a 4-character stem
+      // ("லட்ச"), which dropping just the last character of "லட்சம்"
+      // doesn't reach (that only strips the trailing combining mark,
+      // leaving a 5-character root that still isn't a substring of the
+      // combining form). How many characters a script's inflectional
+      // ending needs trimmed isn't the same word to word, so try a few
+      // instead of tuning one fixed amount per word.
+      for (let trim = 0; trim <= 3 && word.length - trim >= 3; trim++) {
+        const root = trim === 0 ? word : word.slice(0, -trim);
+        if (lower.includes(root)) return true;
+      }
+    }
+  }
+  return false;
 }
 
 /** Extracts a value for the given form field from a free-text utterance, in the borrower's
@@ -258,11 +572,27 @@ export function extractFieldValue(
   if (!text) return { ok: false, value: null, displayValue: "" };
 
   if (field?.type === "number") {
-    const multiplierValue = parseAmountWithMultipliers(text, lang);
+    // Normalize spelled-out number words to digits FIRST, in the borrower's
+    // own language (see wordsToDigits's doc comment for why this has to
+    // happen before the multiplier check, not after it) — "two lakh fifty
+    // thousand" -> "2 lakh 50 thousand" -> the multiplier parser below
+    // handles it exactly like it already handles a literal "2 lakh 50
+    // thousand".
+    const normalized = wordsToDigits(text, lang);
+    const multiplierValue = parseAmountWithMultipliers(normalized, lang);
     if (multiplierValue !== null) {
       return { ok: true, value: multiplierValue, displayValue: multiplierValue.toLocaleString("en-IN") };
     }
-    const numMatch = text.replace(/,/g, "").match(/\d+(\.\d+)?/);
+    // Guard before the bare-digit fallback — see containsMultiplierHint's
+    // own doc comment for the real, confirmed bug this prevents: text that
+    // clearly seems to be stating a multiplied amount (contains a lakh/
+    // crore/thousand word or a close variant) but which the multiplier
+    // parser above couldn't fully resolve must NOT fall through to grabbing
+    // some unrelated leading digit as if it were the whole answer.
+    if (containsMultiplierHint(text, lang)) {
+      return { ok: false, value: null, displayValue: text };
+    }
+    const numMatch = normalized.replace(/,/g, "").match(/\d+(\.\d+)?/);
     if (numMatch) {
       const value = Math.round(parseFloat(numMatch[0]));
       return { ok: true, value, displayValue: value.toLocaleString("en-IN") };
@@ -294,9 +624,76 @@ export function extractFieldValue(
     return { ok: false, value: null, displayValue: text };
   }
 
+  // The "email" field specifically: real end-to-end test confirmed a
+  // borrower dictating their address aloud ("ramesh dot kumar at gmail dot
+  // com") gets saved completely verbatim — "ramesh dot kumar at gmail dot
+  // com" is not a usable email address, and this field is exactly the one
+  // place that unusable value would silently break something real
+  // downstream (notifications, dossier contact info). Reconstructing the
+  // spoken punctuation is specific to this one field, not a general
+  // text-field behavior — "dot"/"at"/"dash"/"underscore" are only safe to
+  // rewrite when the field is unambiguously an email address.
+  if (fieldKey === "email" && lang === "en") {
+    const reconstructed = text
+      .toLowerCase()
+      .replace(/\s*\bat\b\s*/g, "@")
+      .replace(/\s*\bdot\b\s*/g, ".")
+      .replace(/\s*\b(dash|hyphen)\b\s*/g, "-")
+      .replace(/\s*\bunderscore\b\s*/g, "_")
+      .replace(/\s+/g, "");
+    if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(reconstructed)) {
+      return { ok: true, value: reconstructed, displayValue: reconstructed };
+    }
+    // Didn't come out looking like an email after reconstruction (borrower
+    // may have just typed it correctly already, or said something this
+    // simple word-swap can't fix) — fall through to the generic text
+    // handling below rather than force a bad value.
+  }
+
+  // The "idNumber" field specifically: reported live, mic input for an
+  // Aadhaar number came through with a trailing period — Web Speech API
+  // commonly appends terminal punctuation at the end of a dictated
+  // utterance, same class of artifact as the "dot"/"at" spoken-punctuation
+  // problem email has, just unwanted here instead of needed. Not just
+  // cosmetic: idProofCheck.ts's own OCR cross-check (checkIdNumberMatch)
+  // normalizes by stripping whitespace only, not stray punctuation, so a
+  // saved "123456789012." would never match the OCR'd 12-digit Aadhaar
+  // number and would flag as a mismatch every time — a false positive
+  // caused by this bug, not by a genuine data problem. No legitimate
+  // Aadhaar/PAN/Voter ID/driving-licence number ever contains a period or
+  // comma, so stripping them unconditionally (not just trailing — dictation
+  // punctuation isn't always exactly at the end) is always safe here.
+  if (fieldKey === "idNumber") {
+    const cleaned = text.replace(/[.,]/g, "").trim();
+    if (cleaned.length >= 2) {
+      return { ok: true, value: cleaned, displayValue: cleaned };
+    }
+  }
+
   // text / textarea: accept as-is if it looks like a real answer (not just noise) —
   // stored verbatim in whatever language/script the borrower used, never translated.
   if (text.length < 2) return { ok: false, value: null, displayValue: text };
+
+  // Strip a generic conversational lead-in ("My name is X" -> "X") for
+  // plain "text" fields only — NOT textarea, where the full sentence is
+  // usually the intended answer (loanPurpose, existingObligations read
+  // naturally as sentences; stripping "I run" from "I run a small business"
+  // would leave a fragment, not a cleaner answer). Confirmed live: a
+  // borrower answering "fullName" with "My name is Ramesh Kumar" got that
+  // entire sentence saved as their name. English-only for now — confirmed
+  // in the same multi-language end-to-end test run that this is a real,
+  // still-open gap in all five other launch languages too ("मेरा नाम रमेश
+  // कुमार है" etc. all saved verbatim), unlike wordsToDigits above, which
+  // that same test run confirmed now covers all six. Anchored to the START
+  // of the text only, so it can't ever eat into the middle of a genuine
+  // answer that happens to contain one of these phrases.
+  if (field?.type === "text" && lang === "en") {
+    const stripped = text.replace(/^(my name is|i am|i'm|this is|it is|it's|call me|you can call me)\s+/i, "").trim();
+    if (stripped.length >= 2) {
+      return { ok: true, value: stripped, displayValue: stripped };
+    }
+  }
+
   return { ok: true, value: text, displayValue: text };
 }
 

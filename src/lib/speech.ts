@@ -15,6 +15,28 @@ import { SPEECH_LOCALE } from "@/lib/i18n";
  * migration — callers only ever see `useSpeech()`.
  */
 
+// Chrome's SpeechRecognition auto-punctuates each individual FINAL result —
+// capitalizes it and tacks on a trailing "." (or "?"/"!"), the same "smart
+// formatting" behavior Chrome's dictation has everywhere. That's harmless
+// for a single short answer, but continuous:true below (a real, previously
+// reported fix — see its own comment) means one mic press can now settle on
+// several final chunks across a single spoken answer's natural pauses, and
+// each one gets its own auto-period. Joined together, a single sentence
+// spoken with normal pauses — "we manufacture rubber products, for export,
+// to a few countries" — came back as "We manufacture rubber products. For
+// export. To a few countries.": reported live as looking broken, same root
+// cause (Chrome inserting punctuation the borrower never said) as the
+// idNumber trailing-period fix, just happening at every pause instead of
+// only at the very end. Stripping ONE trailing terminal punctuation mark
+// from each chunk before joining turns that back into one flowing sentence.
+// Deliberately NOT touching capitalization here too — Chrome's guess at
+// where a "sentence" starts is unreliable, but lowercasing a chunk's first
+// letter would be actively wrong whenever that word is a genuine proper
+// noun (a name, a place), a worse mistake than a stray capital mid-sentence.
+function stripAutoPunctuation(chunk: string): string {
+  return chunk.trim().replace(/[.!?]+$/, "");
+}
+
 interface UseSpeechOptions {
   lang: LangCode;
   onResult?: (transcript: string, isFinal: boolean) => void;
@@ -92,7 +114,7 @@ export function useSpeech({ lang, onResult }: UseSpeechOptions) {
       let interim = "";
       for (let i = event.resultIndex; i < event.results.length; i++) {
         const res = event.results[i];
-        if (res.isFinal) finalChunksRef.current.push(res[0].transcript);
+        if (res.isFinal) finalChunksRef.current.push(stripAutoPunctuation(res[0].transcript));
         else interim += res[0].transcript;
       }
       const settledSoFar = finalChunksRef.current.join(" ");

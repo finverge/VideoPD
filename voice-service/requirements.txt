@@ -1,0 +1,33 @@
+# Voice-biometrics microservice — see README.md for what this is, what it
+# isn't, and why it's a separate Python service rather than in-app JS.
+#
+# torch is installed separately (CPU wheel, see README) before this file —
+# `pip install -r requirements.txt` alone will pull the huge default CUDA
+# wheel from PyPI, which is not what we want here.
+
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+speechbrain==1.1.0
+numpy<2.0
+scikit-learn==1.6.1
+imageio-ffmpeg==0.5.1
+huggingface_hub==0.27.1
+transformers==4.57.1
+pillow==11.1.0
+opencv-contrib-python==5.0.0.93
+scikit-image==0.26.0
+gdown==5.2.0  # one-time LipForensics checkpoint download only, not used at runtime — see README's "Setup"
+
+# torchvision, pinned to the SAME release as torch/torchaudio (see README's
+# "Setup" torch/torchaudio pin note) — transformers' AutoImageProcessor
+# (used by deepfake.py) requires it. Installing it unpinned pulls the
+# latest torch as a side effect and silently breaks the torch/torchaudio
+# pairing speechbrain needs — hit live, see README's "Setup" section.
+
+# resemblyzer + its real runtime deps (librosa, soundfile, scipy, click) are
+# installed separately, with --no-deps on resemblyzer itself — its declared
+# dependency on `webrtcvad` fails to build on Windows without MSVC Build
+# Tools (no C compiler in this sandbox). `webrtcvad-wheels` is a real PyPI
+# package providing prebuilt Windows wheels for the same `webrtcvad` import,
+# installed in its place. See README.md "Setup" for the exact commands.

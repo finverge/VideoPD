@@ -26,6 +26,7 @@ import { Input } from "@/components/ui/Input";
 import {
   CORE_STEPS,
   SEGMENT_FIELDS,
+  fieldValidationError,
   fieldsForStep,
   getWizardSteps,
 } from "@/lib/formSchema";
@@ -63,6 +64,9 @@ export default function ApplyPage() {
   const [saving, setSaving] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  // Which field the borrower's cursor is actually in right now, if any —
+  // see activeFieldKey below for why this exists.
+  const [focusedFieldKey, setFocusedFieldKey] = useState<string | null>(null);
 
   const steps = useMemo(() => getWizardSteps(), []);
 
@@ -135,31 +139,89 @@ export default function ApplyPage() {
     const nextStep = Math.min(step + 1, steps.length - 1);
     await persist({ fields, currentStep: nextStep, segmentFields });
     setStep(nextStep);
+    setFocusedFieldKey(null); // a new step's fields start with no focus of their own
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
   async function goBack() {
     const prevStep = Math.max(step - 1, 0);
     setStep(prevStep);
+    setFocusedFieldKey(null);
     await persist({ currentStep: prevStep });
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
+  // Reported live: pressing Enter after the last field on a step did
+  // nothing — there's no <form> wrapper here (fields span three different
+  // renderers: StepFields, the segment grid, and upload/review), so Enter
+  // never had a submit to trigger and the borrower was forced to reach for
+  // the mouse every single step. Listens at the step Card level rather than
+  // per-field, and mirrors whatever already gates the visible Next
+  // button — same evidenceComplete check on the upload step, same
+  // `saving` guard — so Enter can never do something the button itself
+  // wouldn't currently allow. Two deliberate exclusions: a <textarea>
+  // (Enter there means "new line", not "next step" — loanPurpose and
+  // existingObligations are free-text answers people naturally write as
+  // more than one line), and the review step (Enter silently submitting a
+  // loan application is a much bigger mistake to make by accident than
+  // Enter silently advancing a step, so Submit stays a deliberate click
+  // only, same reasoning as the two-eyes rule elsewhere in this app).
+  function handleStepKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
+    if (e.key !== "Enter") return;
+    const tag = (e.target as HTMLElement).tagName;
+    if (tag !== "INPUT" && tag !== "SELECT") return;
+    e.preventDefault();
+    if (saving || steps[step] === "stepReview") return;
+    if (steps[step] === "stepUpload" && !evidenceComplete) return;
+    if (currentStepHasPatternError) return;
+    goNext();
+  }
+
+  // Delegated at the step Card level rather than per-field — every field
+  // renderer here (StepFields for core fields, the inline segment grid)
+  // already sets id={f.key} on its Input/Select, so the DOM id alone is
+  // enough to know which field just got focus. React's synthetic onFocus
+  // bubbles through this handler for any descendant, so this doesn't need
+  // to touch StepFields' own prop surface.
+  function handleStepFocus(e: React.FocusEvent<HTMLDivElement>) {
+    const id = (e.target as HTMLElement).id;
+    if (id && (currentCoreFields.some((f) => f.key === id) || currentSegmentFields.some((f) => f.key === id))) {
+      setFocusedFieldKey(id);
+    }
+  }
+
   const currentCoreFields = step < CORE_STEPS.length ? fieldsForStep(step, segment) : [];
+  // Reported live: filling a field by hand, the chat prompt visibly jumped
+  // ahead to ask about the NEXT field the instant this one got a value —
+  // before the borrower's cursor had even moved there. That's because this
+  // used to be purely "walk the empty fields in order," with no awareness
+  // of where focus actually is. Now it prefers wherever the borrower's
+  // cursor genuinely is (via focusedFieldKey below) and only falls back to
+  // "first empty field" when nothing on this step is focused yet — which
+  // is still the common case, since the more typical real usage is
+  // voice-first: a borrower who never touches an input directly, just
+  // talks the assistant through the form, so there has to be SOME starting
+  // field to ask about before any focus event has ever fired.
   const activeFieldKey = useMemo(() => {
+    if (focusedFieldKey && currentCoreFields.some((f) => f.key === focusedFieldKey)) {
+      return focusedFieldKey;
+    }
     const empty = currentCoreFields.find((f) => !fields[f.key]);
     return empty?.key ?? null;
-  }, [currentCoreFields, fields]);
+  }, [currentCoreFields, fields, focusedFieldKey]);
   const activeFieldLabel = activeFieldKey
     ? t(lang, currentCoreFields.find((f) => f.key === activeFieldKey)?.labelKey ?? "")
     : null;
 
-  // Same "walk the empty fields in order" pattern as core fields, but for the
-  // segment step — lets the chatbot fill Farmer/Student/Business fields too.
+  // Same focus-aware pattern as core fields, but for the segment step —
+  // lets the chatbot fill Farmer/Student/Business fields too.
   const currentSegmentFields = steps[step] === "stepSegment" ? SEGMENT_FIELDS[segment] : [];
   const activeSegmentFieldKey = useMemo(() => {
+    if (focusedFieldKey && currentSegmentFields.some((f) => f.key === focusedFieldKey)) {
+      return focusedFieldKey;
+    }
     const empty = currentSegmentFields.find((f) => !segmentFields[f.key]);
     return empty?.key ?? null;
-  }, [currentSegmentFields, segmentFields]);
+  }, [currentSegmentFields, segmentFields, focusedFieldKey]);
   const activeSegmentFieldLabel = activeSegmentFieldKey
     ? t(lang, currentSegmentFields.find((f) => f.key === activeSegmentFieldKey)?.labelKey ?? "")
     : null;
@@ -170,6 +232,25 @@ export default function ApplyPage() {
   const chatFieldKey = step < CORE_STEPS.length ? activeFieldKey : steps[step] === "stepSegment" ? activeSegmentFieldKey : null;
   const chatFieldLabel = step < CORE_STEPS.length ? activeFieldLabel : steps[step] === "stepSegment" ? activeSegmentFieldLabel : null;
   const chatOnFieldUpdate = steps[step] === "stepSegment" ? updateSegmentField : updateField;
+
+  // Priority fix, reported live, then extended to every other field after
+  // an audit turned up more of the same shape (email, DOB, bank account
+  // number, ID number, several numeric fields with no floor): none of
+  // these had any format/length/range validation at all, so a garbled,
+  // truncated, or nonsensical value went straight through with nothing but
+  // an inline hint nobody had to notice. This blocks Next (and Enter, which
+  // mirrors whatever gates Next — see handleStepKeyDown) the same way
+  // evidenceComplete already blocks it on the upload step, rather than
+  // leaving the error message purely decorative. Passes the step's own
+  // full values as allValues — only idNumber's validator actually looks at
+  // a sibling field (idType) right now, but every field gets offered it
+  // uniformly rather than special-casing the plumbing per field.
+  const currentStepHasPatternError =
+    step < CORE_STEPS.length
+      ? currentCoreFields.some((f) => fieldValidationError(f, fields[f.key], fields))
+      : steps[step] === "stepSegment"
+      ? currentSegmentFields.some((f) => fieldValidationError(f, segmentFields[f.key], segmentFields))
+      : false;
 
   const requiredEvidence: EvidenceItem["type"][] = ["ID_PROOF", "ADDRESS_PROOF", "SELFIE"];
   const evidenceComplete = requiredEvidence.every((reqType) => evidence.some((e) => e.type === reqType));
@@ -253,7 +334,7 @@ export default function ApplyPage() {
               exit={{ opacity: 0, x: -16 }}
               transition={{ duration: 0.22 }}
             >
-              <Card className="min-h-[420px]">
+              <Card className="min-h-[420px]" onKeyDown={handleStepKeyDown} onFocus={handleStepFocus}>
                 <h2 className="mb-6 text-xl font-extrabold tracking-tight text-ink-900 dark:text-white">
                   {stepLabels[step]}
                 </h2>
@@ -296,6 +377,9 @@ export default function ApplyPage() {
                         id={f.key}
                         type={f.type === "number" ? "number" : "text"}
                         label={t(lang, f.labelKey)}
+                        min={f.min}
+                        max={f.max}
+                        error={fieldValidationError(f, segmentFields[f.key], segmentFields) ?? undefined}
                         value={(segmentFields[f.key] as string | number) ?? ""}
                         onChange={(e) =>
                           updateSegmentField(f.key, f.type === "number" ? Number(e.target.value) : e.target.value)
@@ -364,9 +448,17 @@ export default function ApplyPage() {
                       sweep across every page — this was the one real gap
                       found; every other page's async actions already used
                       the shared Button component's own loading spinner. */}
-                  <Button variant="ghost" onClick={goBack} disabled={step === 0 || saving} loading={saving} icon={<ArrowLeft className="h-4 w-4" />}>
-                    {t(lang, "back")}
-                  </Button>
+                  {/* Next/Submit is written BEFORE Back here, not after —
+                      keyboard Tab order follows DOM order, not the visual
+                      left-to-right layout (CSS `order` below only changes
+                      where each button PAINTS, never where Tab visits it).
+                      With Back first in the markup, tabbing out of the
+                      step's last field landed on Back, not Next — reported
+                      live as "Tab lands on the wrong button." order-first/
+                      order-last put them back in their normal Back-left,
+                      Next-right positions visually while Tab now reaches
+                      Next (the button someone finishing a field is actually
+                      going for) first. */}
                   {steps[step] === "stepReview" ? (
                     <Button
                       size="lg"
@@ -374,6 +466,7 @@ export default function ApplyPage() {
                       disabled={!evidenceComplete || !allConsentGiven}
                       onClick={handleSubmit}
                       icon={<CheckCircle2 className="h-4 w-4" />}
+                      className="order-last"
                     >
                       {t(lang, "submit")}
                     </Button>
@@ -382,12 +475,16 @@ export default function ApplyPage() {
                       size="lg"
                       loading={saving}
                       onClick={goNext}
-                      disabled={saving || (steps[step] === "stepUpload" && !evidenceComplete)}
+                      disabled={saving || currentStepHasPatternError || (steps[step] === "stepUpload" && !evidenceComplete)}
                       icon={<ArrowRight className="h-4 w-4" />}
+                      className="order-last"
                     >
                       {t(lang, "next")}
                     </Button>
                   )}
+                  <Button variant="ghost" onClick={goBack} disabled={step === 0 || saving} loading={saving} icon={<ArrowLeft className="h-4 w-4" />} className="order-first">
+                    {t(lang, "back")}
+                  </Button>
                 </div>
               </Card>
             </motion.div>

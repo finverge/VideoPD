@@ -129,6 +129,27 @@ container running, calls fall back to STUN-only automatically — nothing breaks
 additive. See `docs/videopd-future-work.md` item 1 for exactly what's been verified about this
 (a real relay allocation, confirmed live) versus what hasn't (an actual multi-device call).
 
+**Scanned-PDF bank statements** (a bank statement with no native PDF text layer) need
+[PyMuPDF](https://pypi.org/project/PyMuPDF/) on system Python for the rasterize-then-OCR
+fallback (`scripts/rasterize-pdf.py`, `src/lib/bankStatement.ts`):
+
+```bash
+python -m pip install pymupdf
+```
+
+Without it, a scanned PDF falls back to the pre-existing behavior — flagged `NEEDS_REVIEW`
+for manual review — rather than failing outright. A borrower can also work around this by
+photographing the statement instead (routes straight to the plain-image OCR path, which only
+needs `tesseract.js`, already an npm dependency).
+
+**Voice biometrics, deepfake, and lip-sync checks** (selfie-step/business-verification/
+live-call voice consistency, multi-speaker scans, frame-level deepfake detection, and
+lip-sync/face-forgery detection — the latter two independently admin-toggleable at
+`/staff/risk-parameters`) run via a separate Python microservice — see
+[`voice-service/README.md`](voice-service/README.md) for setup and what each check does.
+Optional: the rest of the app works fully without it, the "Run voice check" button just
+reports the service as unreachable.
+
 ## Known gaps to close before this goes anywhere near production
 
 - No real authentication/session security (OTP-verified borrowerId is trusted client-side —

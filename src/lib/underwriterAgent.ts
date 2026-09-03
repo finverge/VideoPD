@@ -29,8 +29,27 @@
  *     — caution.
  *   - Every other queue-level risk flag this app computes (SHARED_DEVICE,
  *     AMOUNT_OUTLIER, EMI_AFFORDABILITY, MULTIPLE_APPLICATIONS, DOC_QUALITY,
- *     INCOMPLETE) — bucketed by whatever severity that check already
- *     assigned itself.
+ *     INCOMPLETE, VOICE_CONSISTENCY, MULTI_SPEAKER_DETECTED,
+ *     LIVE_CALL_VOICE_CONSISTENCY, LIVE_CALL_MULTI_SPEAKER_DETECTED,
+ *     ID_PROOF_NUMBER_MISMATCH, DEEPFAKE_SUSPECTED, LIP_SYNC_ANOMALY) — bucketed by whatever
+ *     severity that check already assigned itself. The voice-biometrics
+ *     flags (both the guided-flow-recording pair and the Tier 1 live-call
+ *     recording, see LiveCallRoom's recordForVoiceCheck prop) flow through
+ *     this same generic path, nothing special-cased for them (see
+ *     voice-service/README.md for what they actually check — real
+ *     SpeechBrain/Resemblyzer speaker embeddings, but uncalibrated
+ *     thresholds, so all four stay "medium"/cautions, never blockers).
+ *     ID_PROOF_NUMBER_MISMATCH (src/lib/idProofCheck.ts) is real OCR'd-
+ *     number-vs-declared-number comparison — also "medium"/caution, since
+ *     OCR misreads on a photographed card are common. DEEPFAKE_SUSPECTED
+ *     (voice-service/deepfake.py) is a real frame-level image classifier,
+ *     and LIP_SYNC_ANOMALY (voice-service/lipsync_check.py) is a real
+ *     face-detection + lip-region forgery classifier (LipForensics) — both
+ *     "low"/caution, a step below the voice-biometrics flags since they're
+ *     single community-trained models rather than an established library,
+ *     and both independently admin-toggleable
+ *     (src/lib/featureSettings.ts) — off entirely for any application
+ *     drafted while its toggle is off.
  *   - Missing identity/business-verification capture, or no bank statement
  *     ever provided — treated as a blocker, not just a caution: a case can
  *     reach VideoPD "COMPLETE" status even when one specific capture step
@@ -45,14 +64,12 @@
  *     the underwriter, but nothing compares them against the declared
  *     address or flags an inconsistency — that's a display feature, not a
  *     check, so there is no such signal for the agent to use.
- *   - ID-document text fields (e.g., the ID number printed on the uploaded
- *     proof) vs. the ID number typed into the application. Only the PHOTO
- *     is compared (face match) — no OCR-based ID-number extraction/
- *     cross-check exists.
- *   - Lip-sync, background-voice/coaching, or deepfake detection — refused
- *     outright elsewhere in this app (see docs/videopd-future-work.md),
- *     never attempted, so obviously not fed in here either.
+ *   - "Coaching" as an intent/content judgment. MULTI_SPEAKER_DETECTED above
+ *     only means a second voice was present in a recording — it does not
+ *     itself confirm that voice was coaching the borrower on answers, which
+ *     would need real content/NLU understanding this app doesn't have.
  *
+
  * Honest about what "AI agent" means here: this is deterministic,
  * transparent rule synthesis over real, already-computed signals — not a
  * language model. This app has never called a real LLM (every other "real"
@@ -162,18 +179,34 @@ export function draftUnderwriterRecommendation(input: DraftRecommendationInput):
 
   const recommendation: "APPROVE" | "REJECT" = blockers.length > 0 ? "REJECT" : "APPROVE";
 
-  const parts: string[] = [];
-  parts.push(`Draft recommendation: ${recommendation}.`);
+  // Line-by-line, not one space-joined paragraph — reported live: every
+  // blocker/caution/positive used to run together into a single dense
+  // sentence per category ("Reason: A. B. C."), hard to actually scan.
+  // Each individual point gets its own line now; the case-detail page
+  // renders this with a line-preserving style, and it's stored this way
+  // too (not just formatted for display), so the same readability carries
+  // into the Decision Trail, PDF dossier, and anywhere else this text
+  // ends up later.
+  const lines: string[] = [];
+  lines.push(`Draft recommendation: ${recommendation}`);
+  lines.push("");
   if (blockers.length > 0) {
-    parts.push(`Reason: ${blockers.join(" ")}`);
+    lines.push("Blocking issues:");
+    for (const b of blockers) lines.push(`• ${b}`);
+  } else if (positives.length > 0) {
+    lines.push("Basis for approval:");
+    for (const p of positives) lines.push(`• ${p}`);
   } else {
-    parts.push(positives.length > 0 ? `Basis: ${positives.join(" ")}` : "No completed checks produced a clear positive or negative signal — review the case directly.");
+    lines.push("No completed checks produced a clear positive or negative signal — review the case directly.");
   }
   if (cautions.length > 0) {
-    parts.push(`Also worth noting before confirming: ${cautions.join(" ")}`);
+    lines.push("");
+    lines.push("Also worth noting before confirming:");
+    for (const c of cautions) lines.push(`• ${c}`);
   }
-  parts.push(riskSeverity !== "none" ? `Overall risk severity: ${riskSeverity}.` : "Overall risk severity: none.");
-  parts.push("— Drafted by rule-based synthesis of the checks above, not a language model. Review and edit before confirming.");
+  lines.push("");
+  lines.push(riskSeverity !== "none" ? `Overall risk severity: ${riskSeverity}.` : "Overall risk severity: none.");
+  lines.push("— Rule-based synthesis of the checks above, not a language model.");
 
-  return { recommendation, reasoning: parts.join(" ") };
+  return { recommendation, reasoning: lines.join("\n") };
 }

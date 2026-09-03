@@ -57,6 +57,23 @@ export const translations: Record<LangCode, Dict> = {
     verifyOtp: "Verify & continue",
     resendOtp: "Resend code",
     devOtpHint: "Dev mode — OTP gateway is mocked",
+    // Duplicate-application check (src/app/page.tsx's verifyOtp, backed by
+    // api/application/duplicate-check) — English-only for now, same
+    // accepted scope limit as the framing-phrase-stripping gap documented
+    // in dialogManager.ts (t() falls back to English automatically in
+    // every other language rather than showing a raw key). Plain segment
+    // nouns, not segmentFarmer/segmentStudent/segmentBusiness above —
+    // those are first-person self-descriptions ("I'm a Farmer") that read
+    // wrong mid-sentence here ("in progress in I'm a Farmer").
+    segmentNameFarmer: "Farmer",
+    segmentNameStudent: "Vocational Student",
+    segmentNameBusiness: "Business Owner",
+    duplicateDifferentSegmentTitle: "Application already in progress",
+    duplicateDifferentSegmentBody: "You already have an application in progress in {existingSegment}. Do you want to create another application in {newSegment}?",
+    duplicateSameSegmentTitle: "Resume your application?",
+    duplicateSameSegmentBody: "There is already one application in progress with your name and mobile number. Do you want to resume your journey?",
+    duplicateYes: "Yes",
+    duplicateNo: "No",
     stepPersonal: "Personal details",
     stepAddress: "Address",
     stepIdentity: "Identity",
@@ -172,6 +189,8 @@ export const translations: Record<LangCode, Dict> = {
     vpdStepQnA: "A few questions",
     vpdStepBusiness: "Show us your workplace",
     vpdStepBusinessBody: "Record a short video of your workshop, farm, or business, showing your equipment.",
+    vpdStepInstitute: "Show us your institute",
+    vpdStepInstituteBody: "Record a short video of your training institute, showing the classroom or facilities.",
     vpdStepBankStatement: "Bank statement",
     vpdStepBankStatementBody: "Upload a recent bank statement (photo or PDF) to help us assess your application.",
     vpdUploadStatement: "Upload statement",
@@ -333,6 +352,8 @@ export const translations: Record<LangCode, Dict> = {
     vpdStepQnA: "कुछ सवाल",
     vpdStepBusiness: "अपना कार्यस्थल दिखाएं",
     vpdStepBusinessBody: "अपनी वर्कशॉप, खेत, या व्यवसाय का एक छोटा वीडियो रिकॉर्ड करें, जिसमें आपके उपकरण दिखें।",
+    vpdStepInstitute: "अपना संस्थान दिखाएं",
+    vpdStepInstituteBody: "अपने प्रशिक्षण संस्थान का एक छोटा वीडियो रिकॉर्ड करें, जिसमें कक्षा या सुविधाएं दिखें।",
     vpdStepBankStatement: "बैंक स्टेटमेंट",
     vpdStepBankStatementBody: "अपने आवेदन का आकलन करने में मदद के लिए हाल का बैंक स्टेटमेंट (फ़ोटो या PDF) अपलोड करें।",
     vpdUploadStatement: "स्टेटमेंट अपलोड करें",
@@ -494,6 +515,8 @@ export const translations: Record<LangCode, Dict> = {
     vpdStepQnA: "కొన్ని ప్రశ్నలు",
     vpdStepBusiness: "మీ కార్యస్థలాన్ని చూపించండి",
     vpdStepBusinessBody: "మీ పరికరాలను చూపిస్తూ మీ వర్క్‌షాప్, పొలం, లేదా వ్యాపారం యొక్క చిన్న వీడియో రికార్డ్ చేయండి.",
+    vpdStepInstitute: "మీ సంస్థను చూపించండి",
+    vpdStepInstituteBody: "తరగతి గది లేదా సౌకర్యాలను చూపిస్తూ మీ శిక్షణ సంస్థ యొక్క చిన్న వీడియో రికార్డ్ చేయండి.",
     vpdStepBankStatement: "బ్యాంక్ స్టేట్‌మెంట్",
     vpdStepBankStatementBody: "మీ దరఖాస్తును అంచనా వేయడంలో సహాయపడటానికి ఇటీవలి బ్యాంక్ స్టేట్‌మెంట్ (ఫోటో లేదా PDF) అప్‌లోడ్ చేయండి.",
     vpdUploadStatement: "స్టేట్‌మెంట్ అప్‌లోడ్ చేయండి",
@@ -655,6 +678,8 @@ export const translations: Record<LangCode, Dict> = {
     vpdStepQnA: "சில கேள்விகள்",
     vpdStepBusiness: "உங்கள் பணியிடத்தைக் காட்டுங்கள்",
     vpdStepBusinessBody: "உங்கள் உபகரணங்களைக் காட்டி உங்கள் பட்டறை, பண்ணை, அல்லது வணிகத்தின் குறுகிய வீடியோவை பதிவு செய்யவும்.",
+    vpdStepInstitute: "உங்கள் நிறுவனத்தைக் காட்டுங்கள்",
+    vpdStepInstituteBody: "வகுப்பறை அல்லது வசதிகளைக் காட்டி உங்கள் பயிற்சி நிறுவனத்தின் குறுகிய வீடியோவை பதிவு செய்யவும்.",
     vpdStepBankStatement: "வங்கி அறிக்கை",
     vpdStepBankStatementBody: "உங்கள் விண்ணப்பத்தை மதிப்பிட உதவ சமீபத்திய வங்கி அறிக்கையை (புகைப்படம் அல்லது PDF) பதிவேற்றவும்.",
     vpdUploadStatement: "அறிக்கையை பதிவேற்றவும்",
@@ -816,6 +841,8 @@ export const translations: Record<LangCode, Dict> = {
     vpdStepQnA: "ಕೆಲವು ಪ್ರಶ್ನೆಗಳು",
     vpdStepBusiness: "ನಿಮ್ಮ ಕೆಲಸದ ಸ್ಥಳವನ್ನು ತೋರಿಸಿ",
     vpdStepBusinessBody: "ನಿಮ್ಮ ಉಪಕರಣಗಳನ್ನು ತೋರಿಸುತ್ತಾ ನಿಮ್ಮ ವರ್ಕ್‌ಶಾಪ್, ಜಮೀನು, ಅಥವಾ ವ್ಯಾಪಾರದ ಸಣ್ಣ ವೀಡಿಯೊ ರೆಕಾರ್ಡ್ ಮಾಡಿ.",
+    vpdStepInstitute: "ನಿಮ್ಮ ಸಂಸ್ಥೆಯನ್ನು ತೋರಿಸಿ",
+    vpdStepInstituteBody: "ತರಗತಿ ಕೊಠಡಿ ಅಥವಾ ಸೌಲಭ್ಯಗಳನ್ನು ತೋರಿಸುತ್ತಾ ನಿಮ್ಮ ತರಬೇತಿ ಸಂಸ್ಥೆಯ ಸಣ್ಣ ವೀಡಿಯೊ ರೆಕಾರ್ಡ್ ಮಾಡಿ.",
     vpdStepBankStatement: "ಬ್ಯಾಂಕ್ ಸ್ಟೇಟ್‌ಮೆಂಟ್",
     vpdStepBankStatementBody: "ನಿಮ್ಮ ಅರ್ಜಿಯನ್ನು ನಿರ್ಣಯಿಸಲು ಸಹಾಯ ಮಾಡಲು ಇತ್ತೀಚಿನ ಬ್ಯಾಂಕ್ ಸ್ಟೇಟ್‌ಮೆಂಟ್ (ಫೋಟೋ ಅಥವಾ PDF) ಅಪ್‌ಲೋಡ್ ಮಾಡಿ.",
     vpdUploadStatement: "ಸ್ಟೇಟ್‌ಮೆಂಟ್ ಅಪ್‌ಲೋಡ್ ಮಾಡಿ",
@@ -977,6 +1004,8 @@ export const translations: Record<LangCode, Dict> = {
     vpdStepQnA: "ചില ചോദ്യങ്ങൾ",
     vpdStepBusiness: "നിങ്ങളുടെ ജോലിസ്ഥലം കാണിക്കുക",
     vpdStepBusinessBody: "നിങ്ങളുടെ ഉപകരണങ്ങൾ കാണിച്ചുകൊണ്ട് നിങ്ങളുടെ വർക്ക്ഷോപ്പ്, കൃഷിയിടം, അല്ലെങ്കിൽ ബിസിനസ്സിന്റെ ഒരു ചെറിയ വീഡിയോ റെക്കോർഡ് ചെയ്യുക.",
+    vpdStepInstitute: "നിങ്ങളുടെ സ്ഥാപനം കാണിക്കുക",
+    vpdStepInstituteBody: "ക്ലാസ്‌റൂം അല്ലെങ്കിൽ സൗകര്യങ്ങൾ കാണിച്ചുകൊണ്ട് നിങ്ങളുടെ പരിശീലന സ്ഥാപനത്തിന്റെ ഒരു ചെറിയ വീഡിയോ റെക്കോർഡ് ചെയ്യുക.",
     vpdStepBankStatement: "ബാങ്ക് സ്റ്റേറ്റ്‌മെന്റ്",
     vpdStepBankStatementBody: "നിങ്ങളുടെ അപേക്ഷ വിലയിരുത്താൻ സഹായിക്കാൻ സമീപകാല ബാങ്ക് സ്റ്റേറ്റ്‌മെന്റ് (ഫോട്ടോ അല്ലെങ്കിൽ PDF) അപ്‌ലോഡ് ചെയ്യുക.",
     vpdUploadStatement: "സ്റ്റേറ്റ്‌മെന്റ് അപ്‌ലോഡ് ചെയ്യുക",

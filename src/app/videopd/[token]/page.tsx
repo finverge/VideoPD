@@ -83,6 +83,7 @@ export default function VideoPdSessionPage() {
 
   const lang = session.lead.application.borrower.language ?? "en";
   const applicationId = session.lead.application.id;
+  const segment = session.lead.application.segment;
 
   if (step === "already-complete") {
     return <Centered><StatusCard icon={<CheckCircle2 className="h-8 w-8 text-sprout-500" />} text={t(lang, "vpdAlreadyComplete")} /></Centered>;
@@ -123,7 +124,15 @@ export default function VideoPdSessionPage() {
                 currentStep at all, just an optional live conversation. */}
             <div className="mt-4 border-t border-ink-100 pt-4 dark:border-ink-800">
               {showLiveCall ? (
-                <LiveCallRoom roomId={params.token} displayName="Borrower" analyzeLiveness transcribe lang={lang} />
+                <LiveCallRoom
+                  roomId={params.token}
+                  displayName="Borrower"
+                  analyzeLiveness
+                  transcribe
+                  lang={lang}
+                  recordForVoiceCheck
+                  applicationId={applicationId}
+                />
               ) : (
                 <button
                   onClick={() => setShowLiveCall(true)}
@@ -171,10 +180,17 @@ export default function VideoPdSessionPage() {
 
         {step === "business" && (
           <StepShell key="business">
+            {/* Reported live: this step always said "Show us your workplace" /
+                "your workshop, farm, or business" regardless of segment —
+                fit Farmer and Business Owner well enough, but made no sense
+                for a Vocational Student, who has an institute, not a
+                workplace. Only Student gets its own copy; Farmer keeps the
+                original wording since "workshop, farm, or business" already
+                names farms explicitly and wasn't reported as a problem. */}
             <CaptureStep
               lang={lang}
-              titleKey="vpdStepBusiness"
-              bodyKey="vpdStepBusinessBody"
+              titleKey={segment === "VOCATIONAL_STUDENT" ? "vpdStepInstitute" : "vpdStepBusiness"}
+              bodyKey={segment === "VOCATIONAL_STUDENT" ? "vpdStepInstituteBody" : "vpdStepBusinessBody"}
               mode="video"
               facingMode="environment"
               applicationId={applicationId}

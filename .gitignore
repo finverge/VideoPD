@@ -18,3 +18,20 @@ eng.traineddata
 
 # TypeScript incremental build cache — regenerated, environment-specific.
 tsconfig.tsbuildinfo
+
+# Voice-biometrics microservice (voice-service/README.md) — Python venv,
+# downloaded model weights (~80MB ECAPA-TDNN + ~144MB LipForensics), and
+# bytecode cache. Each environment sets these up itself per the README,
+# same as node_modules.
+.venv-voice/
+voice-service/model_cache/
+voice-service/__pycache__/
+voice-service/lipsync/__pycache__/
+__pycache__/
+
+# Vendored MIT-licensed face detection/alignment packages (ibug-group,
+# see voice-service/README.md's "Deepfake/lip-sync" section) — real code
+# with real bundled model weights (~370MB combined), fetched once per
+# environment via `git clone`, not committed. See README's "Setup" for
+# the exact clone commands.
+voice-service/vendor/

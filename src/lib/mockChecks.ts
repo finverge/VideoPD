@@ -161,11 +161,18 @@ export function runAutoAnalysis(input: {
   // Lakshya provides their own. Optional so existing callers/tests that
   // don't pass one still get sensible generic behavior.
   riskParameters?: { maxLoanToIncomeMultiple: number; assumedAnnualInterestRatePct: number; maxEmiToIncomeRatioPct: number };
+  // Set only when the ID_PROOF evidence's OCR'd number didn't match the
+  // declared idNumber (src/lib/idProofCheck.ts, run at upload time in
+  // api/upload/route.ts) — undefined/null means "not attempted or passed",
+  // not "checked and clean" (see checkIdNumberMatch's own NOT_APPLICABLE
+  // cases for why "not attempted" is common and not itself a red flag).
+  idProofNumberMismatchDetail?: string | null;
 }): { riskFlags: RiskFlag[]; completenessScore: number } {
   const flags: RiskFlag[] = [];
   const {
     fields, evidenceCount, requiredEvidenceCount, flaggedEvidenceCount,
     otherLeadCount = 0, sharedDeviceLeadCount = 0, riskParameters = DEFAULT_RISK_PARAMETERS,
+    idProofNumberMismatchDetail = null,
   } = input;
 
   const requiredFields = ["fullName", "idNumber", "requestedAmount", "monthlyIncome", "currentAddress"];
@@ -190,6 +197,15 @@ export function runAutoAnalysis(input: {
       label: "Document quality flagged",
       severity: "medium",
       detail: `${flaggedEvidenceCount} document(s) failed the automated quality check.`,
+    });
+  }
+
+  if (idProofNumberMismatchDetail) {
+    flags.push({
+      code: ID_PROOF_NUMBER_RISK_FLAG_CODE,
+      label: "ID number mismatch",
+      severity: "medium", // advisory — OCR misreads are common, see idProofCheck.ts
+      detail: idProofNumberMismatchDetail,
     });
   }
 
@@ -344,6 +360,15 @@ export function evaluateLivenessResult(input: {
   return { status: flagged ? "FLAGGED" : "PASSED", notes: notes.join(" ") };
 }
 
+// Set at /api/submit time from the ID_PROOF evidence row's own
+// authenticityStatus/authenticityNotes (populated at upload time — see
+// idProofCheck.ts and api/upload/route.ts). Distinct from
+// IDENTITY_RISK_FLAG_CODE below: this checks the NUMBER printed on the
+// document against what was typed on the application; that one checks the
+// PHOTO against the borrower's liveness recording. Genuinely different
+// signals, not a duplicate.
+export const ID_PROOF_NUMBER_RISK_FLAG_CODE = "ID_PROOF_NUMBER_MISMATCH";
+
 // Stable code so api/videopd/[token]/liveness-result can replace (not
 // duplicate) this flag in a Lead's summary.riskFlags across calls, and so a
 // later clean result can remove it again rather than leaving a stale flag
@@ -369,6 +394,115 @@ export const BANK_STATEMENT_AUTHENTICITY_RISK_FLAG_CODE = "BANK_STATEMENT_AUTHEN
  * statement panel. */
 export function bankStatementAuthenticityRiskFlag(reasons: string[]): RiskFlag {
   return { code: BANK_STATEMENT_AUTHENTICITY_RISK_FLAG_CODE, label: "Bank statement authenticity flagged", severity: "high", detail: reasons.join(" ") };
+}
+
+// Same pattern again — stable codes so a later clean re-check replaces
+// rather than duplicates these. Both are "medium", not "high": the
+// voice-service's own thresholds are each library's published default, not
+// calibrated against Lakshya's borrower population (see
+// voice-service/README.md "Calibration"), so these stay advisory signals
+// for the underwriter to weigh, not a same-severity peer of a confirmed
+// tampered bank statement.
+export const VOICE_CONSISTENCY_RISK_FLAG_CODE = "VOICE_CONSISTENCY";
+export const MULTI_SPEAKER_RISK_FLAG_CODE = "MULTI_SPEAKER_DETECTED";
+
+/** Wraps a /voice-consistency same_speaker:false result as a RiskFlag — the
+ * selfie-step and business-verification-step recordings didn't sound like
+ * the same person. */
+export function voiceConsistencyRiskFlag(similarity: number, method: string): RiskFlag {
+  return {
+    code: VOICE_CONSISTENCY_RISK_FLAG_CODE,
+    label: "Voice mismatch between VideoPD capture steps",
+    severity: "medium",
+    detail: `The voice in the selfie-step recording and the business-verification recording did not match closely enough (similarity ${similarity.toFixed(2)}, ${method}). Worth an underwriter listen — this can also happen with a noisy mic or a long gap between steps, not only a substitution.`,
+  };
+}
+
+/** Wraps a /multi-speaker multiple_voices_detected:true result as a
+ * RiskFlag. clipLabel identifies which of the two recordings triggered it. */
+export function multiSpeakerRiskFlag(clipLabel: string, speakerCount: number): RiskFlag {
+  return {
+    code: MULTI_SPEAKER_RISK_FLAG_CODE,
+    label: "Multiple voices detected in recording",
+    severity: "medium",
+    detail: `The ${clipLabel} recording appears to contain ${speakerCount} distinct voices. This flags that someone else was talking in the recording — it does not by itself confirm coaching; an underwriter listen is needed to judge that.`,
+  };
+}
+
+// Tier 1 live-call voice biometrics — same pattern and severity reasoning
+// as the two flags above, kept as distinct codes so an underwriter can tell
+// a live-call finding apart from a guided-flow-recording one (they're
+// checking genuinely different things — see LiveCallRoom's
+// recordForVoiceCheck prop and voice-service/README.md).
+export const LIVE_CALL_VOICE_CONSISTENCY_RISK_FLAG_CODE = "LIVE_CALL_VOICE_CONSISTENCY";
+export const LIVE_CALL_MULTI_SPEAKER_RISK_FLAG_CODE = "LIVE_CALL_MULTI_SPEAKER_DETECTED";
+
+/** Wraps a /voice-consistency same_speaker:false result comparing the live
+ * call recording against the selfie-step recording. */
+export function liveCallVoiceConsistencyRiskFlag(similarity: number, method: string): RiskFlag {
+  return {
+    code: LIVE_CALL_VOICE_CONSISTENCY_RISK_FLAG_CODE,
+    label: "Voice mismatch between live call and VideoPD recording",
+    severity: "medium",
+    detail: `The voice on the live call recording did not match the selfie-step VideoPD recording closely enough (similarity ${similarity.toFixed(2)}, ${method}). Worth an underwriter listen — this can also happen with a noisy mic or a very different call setup, not only a substitution.`,
+  };
+}
+
+// Deepfake — requested live, built despite being explicitly flagged as
+// research-grade (no maintained production package). See
+// voice-service/README.md's "Deepfake/lip-sync" section for exactly what
+// this checks and its real, stated limitations, and
+// src/lib/featureSettings.ts for the admin on/off toggle it's gated
+// behind. "Low", not "medium" like the voice-biometrics flags — this is a
+// step less validated even than those (a single third-party community
+// model, not an established library like SpeechBrain), so it's weighted
+// lighter accordingly.
+//
+// Lip-sync detection: the first candidate found (a community "syncnet-
+// python" package) had a broken public API — confirmed by actually
+// installing and testing it, not just reading its README (see
+// voice-service/README.md's "Deepfake/lip-sync" section for the exact
+// errors). LipForensics (ahaliassos/LipForensics, MIT-licensed, CVPR 2021)
+// is the real one that's shipped instead — a genuine face-forgery
+// detector trained specifically on lip-region analysis, not a lip-sync
+// generator like Wav2Lip (which was also considered and rejected — its
+// repo is explicitly non-commercial-only, a real license blocker for a
+// commercial lending product, unrelated to whether the code works).
+export const DEEPFAKE_RISK_FLAG_CODE = "DEEPFAKE_SUSPECTED";
+export const LIP_SYNC_RISK_FLAG_CODE = "LIP_SYNC_ANOMALY";
+
+/** Wraps a /deepfake-check result where enough sampled frames scored above
+ * the fake-probability threshold. */
+export function deepfakeRiskFlag(clipLabel: string, fakeFrameRatio: number, framesAnalyzed: number, model: string): RiskFlag {
+  return {
+    code: DEEPFAKE_RISK_FLAG_CODE,
+    label: "Possible face-manipulation artifacts detected",
+    severity: "low",
+    detail: `${Math.round(fakeFrameRatio * 100)}% of ${framesAnalyzed} sampled frames from the ${clipLabel} recording scored above the fake-probability threshold (model: ${model}, a single community-trained image classifier — not a maintained production deepfake detector). Frame-level image forensics only, not video-native or temporal analysis. Worth an underwriter look, not a confirmed finding — this class of classifier has real false-positive rates on ordinary compression artifacts, poor lighting, or low-resolution webcam footage.`,
+  };
+}
+
+/** Wraps a /lip-sync-check FLAGGED result — the LipForensics forgery score
+ * (trained specifically on lip-region temporal artifacts) came back above
+ * threshold for a guided-flow clip. */
+export function lipSyncRiskFlag(clipLabel: string, score: number): RiskFlag {
+  return {
+    code: LIP_SYNC_RISK_FLAG_CODE,
+    label: "Possible lip-sync/face-forgery artifacts detected",
+    severity: "low",
+    detail: `The ${clipLabel} recording scored ${score.toFixed(3)} on a lip-region forgery classifier (LipForensics, MIT-licensed, CVPR 2021 — trained on FaceForensics++ to detect mouth-movement artifacts typical of face-swap/reenactment forgeries). Worth an underwriter look, not a confirmed finding — this model was benchmarked on curated research datasets, not this lender's own borrower footage, and real-world webcam conditions (lighting, compression, framing) can affect the score.`,
+  };
+}
+
+/** Wraps a /multi-speaker multiple_voices_detected:true result for the live
+ * call recording. */
+export function liveCallMultiSpeakerRiskFlag(speakerCount: number): RiskFlag {
+  return {
+    code: LIVE_CALL_MULTI_SPEAKER_RISK_FLAG_CODE,
+    label: "Multiple voices detected on live call",
+    severity: "medium",
+    detail: `The borrower's side of the live call recording appears to contain ${speakerCount} distinct voices. This flags that someone else was speaking near the borrower during the call — it does not by itself confirm coaching; an underwriter listen is needed to judge that.`,
+  };
 }
 
 export function riskSeverityOf(flags: RiskFlag[]): "none" | "low" | "medium" | "high" {

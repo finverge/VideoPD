@@ -20,6 +20,7 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
           borrower: true,
           evidence: { orderBy: { createdAt: "asc" } },
           transcripts: { orderBy: { createdAt: "asc" } },
+          voiceBiometricCheck: true,
         },
       },
     },
