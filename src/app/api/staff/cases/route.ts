@@ -30,6 +30,11 @@ export async function GET(req: NextRequest) {
     where,
     include: {
       application: { include: { borrower: true } },
+      // DLP/LOS integration Phase 6 — enough for the queue page's own
+      // getVideoPdProgressBadge (src/lib/videoPdStall.ts) to show whether
+      // a case's borrower has actually opened/progressed their VideoPD
+      // session, not just that a link was sent.
+      videoPdSession: { select: { status: true, currentStep: true, linkSentAt: true, startedAt: true } },
     },
     orderBy: { createdAt: "desc" },
   });

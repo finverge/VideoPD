@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import type { LeadStatus } from "@prisma/client";
+import type { SegmentCode } from "@/types";
+import { startSkillFinanceCase } from "@/lib/dlpWorkflow";
 
 // VIDEOPD_SCHEDULED and VIDEOPD_COMPLETE were missing here — sending a
 // VideoPD link (which moves a case to VIDEOPD_SCHEDULED) permanently took
@@ -38,6 +40,32 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     return NextResponse.json({ error: `Case is not claimable in status ${lead.status}.` }, { status: 409 });
   }
 
-  const updated = await db.lead.findUniqueOrThrow({ where: { id } });
+  // DLP/LOS integration Phase 3 — self-healing backfill: an application
+  // submitted while DLP's Flowable was unreachable never got a process
+  // instance started (submit/route.ts's own graceful degradation — a
+  // null workflowProcessInstanceId never blocked that submission), and
+  // nothing was retrying it afterwards. Claim is the one choke-point
+  // every case passes through before any underwriter/approver work
+  // happens on it, so this is where "every application genuinely tracks
+  // in DLP's workflow, not just ones submitted while Flowable happened to
+  // be up" gets enforced, without needing a separate background job.
+  // Still purely best-effort/non-blocking: startSkillFinanceCase already
+  // degrades to null on failure rather than throwing, and Lead.status
+  // (already committed above) remains this app's real source of truth
+  // either way — a claim never fails or waits on this.
+  const updated = await db.lead.findUniqueOrThrow({ where: { id }, include: { application: true } });
+  if (!updated.application.workflowProcessInstanceId) {
+    const workflowProcessInstanceId = await startSkillFinanceCase(
+      updated.applicationId,
+      updated.application.segment as SegmentCode,
+    );
+    if (workflowProcessInstanceId) {
+      await db.loanApplication.update({
+        where: { id: updated.applicationId },
+        data: { workflowProcessInstanceId },
+      });
+    }
+  }
+
   return NextResponse.json({ lead: updated });
 }

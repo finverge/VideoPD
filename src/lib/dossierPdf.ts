@@ -19,6 +19,11 @@ export interface DossierBankStatementData {
   metrics: { avgBalance: number; minBalance: number; bounceCount: number; estimatedMonthlyIncome: number; emiOutflow: number; transactionCount: number } | null;
 }
 export interface DossierPdfInput {
+  // DLP/LOS integration Phase 5 — the current tenant's display name
+  // (src/lib/tenantConfig.ts), not a hardcoded "Lakshya Skill Finance"
+  // literal. The caller (api/staff/case/[id]/dossier-pdf/route.ts) fetches
+  // it server-side — this module has no DB access of its own.
+  tenantName: string;
   applicantName: string;
   mobile: string;
   segment: string;
@@ -44,10 +49,10 @@ const formatINR = (n: number | null) => (n == null ? "—" : `Rs. ${n.toLocaleSt
 // must never be handed to pdfkit as-is: it silently renders as mojibake
 // rather than erroring, which is worse than an honest placeholder.
 const RENDERABLE_PATTERN = /^[\x00-\xFF‘’“”–—…]*$/;
-function isPdfRenderable(text: string): boolean {
+export function isPdfRenderable(text: string): boolean {
   return RENDERABLE_PATTERN.test(text);
 }
-function sanitizeForPdf(text: string): string {
+export function sanitizeForPdf(text: string): string {
   return text.replace(/₹/g, "Rs. ");
 }
 const FULL_PLACEHOLDER = "(Original answer is in a script this PDF export can't render yet — see English translation below.)";
@@ -60,7 +65,7 @@ const SHORT_PLACEHOLDER = "(non-Latin script)";
 // line and visually collided with "Mobile:"/"Segment:" beside and below it,
 // since the header's y-offsets (110, 126, 142...) assume each row is one
 // line tall and don't reflow for a taller-than-expected Applicant row.
-function renderableOrPlaceholder(text: string, short = false): string {
+export function renderableOrPlaceholder(text: string, short = false): string {
   const clean = sanitizeForPdf(text);
   if (isPdfRenderable(clean)) return clean;
   return short ? SHORT_PLACEHOLDER : FULL_PLACEHOLDER;
@@ -68,14 +73,21 @@ function renderableOrPlaceholder(text: string, short = false): string {
 
 export function generateDossierPdf(data: DossierPdfInput): Promise<Buffer> {
   return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ size: "A4", margin: 50 });
+    // bufferPages: true — required for the footer loop below to reach
+    // every page. Without it, pdfkit flushes each page to the output
+    // stream as soon as the next one starts, so by the time .end() runs
+    // only the LAST page is still switchable — a dossier with enough
+    // Q&A/flags content to spill past one page would throw
+    // "switchToPage(0) out of bounds" (confirmed live on camPdf.ts, which
+    // shares this exact pattern; fixed there too).
+    const doc = new PDFDocument({ size: "A4", margin: 50, bufferPages: true });
     const chunks: Buffer[] = [];
     doc.on("data", (c) => chunks.push(c));
     doc.on("end", () => resolve(Buffer.concat(chunks)));
     doc.on("error", reject);
 
     // Header
-    doc.fontSize(18).font("Helvetica-Bold").fillColor("#0f1730").text("Lakshya Skill Finance", 50, 50);
+    doc.fontSize(18).font("Helvetica-Bold").fillColor("#0f1730").text(data.tenantName, 50, 50);
     doc.fontSize(12).font("Helvetica").fillColor("#4a629d").text("VideoPD Actionable Dossier", 50, 72);
     doc.moveTo(50, 95).lineTo(545, 95).strokeColor("#e7ebf6").stroke();
 
@@ -179,7 +191,7 @@ export function generateDossierPdf(data: DossierPdfInput): Promise<Buffer> {
 
     // Footer disclaimer on every page
     const pages = doc.bufferedPageRange();
-    for (let i = 0; i < pages.count; i++) {
+    for (let i = pages.start; i < pages.start + pages.count; i++) {
       doc.switchToPage(i);
       doc.fontSize(7).font("Helvetica").fillColor("#9caed3").text(
         "Prototype-generated summary — NOT a digitally signed or tamper-proof document. Advisory only; does not constitute an approval decision.",

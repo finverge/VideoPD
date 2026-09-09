@@ -17,6 +17,7 @@ export const DEFAULT_FEATURE_SETTINGS = {
   lipSyncCheckEnabled: true,
   applicationExpiryDays: 30,
   assetDetectionCheckEnabled: true,
+  signageOcrCheckEnabled: true,
 };
 
 export async function getFeatureSettings() {

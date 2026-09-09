@@ -26,6 +26,7 @@ import {
   Mic,
   Users,
   Boxes,
+  ScanText,
 } from "lucide-react";
 import { Card } from "@/components/ui/Card";
 import { LiveCallRoom } from "@/components/LiveCallRoom";
@@ -34,6 +35,8 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Textarea } from "@/components/ui/Input";
 import { getStoredStaff, clearStoredStaff, type StaffMember } from "@/lib/staffAuth";
+import { useTenantConfig } from "@/lib/TenantConfigProvider";
+import { getVideoPdProgressBadge } from "@/lib/videoPdStall";
 import { formatINR, cn } from "@/lib/utils";
 import { SEGMENT_FIELDS } from "@/lib/formSchema";
 import { draftUnderwriterRecommendation } from "@/lib/underwriterAgent";
@@ -101,8 +104,16 @@ interface VideoPdSessionData {
   id: string;
   token: string;
   status: string;
+  currentStep: number;
   linkSentAt: string;
+  startedAt: string | null;
   completedAt: string | null;
+  // DLP/LOS integration Phase 6 — reminderCount/lastReminderSentAt reflect
+  // DLP's own boundary-timer-driven auto-resend (skillfin-videopd-
+  // followup-bridge -> POST .../videopd-reminder), not anything this page
+  // triggers directly.
+  reminderCount: number;
+  lastReminderSentAt: string | null;
   skillIntentScore: number | null;
   dossierJson: string | null;
   answers: VideoPdAnswerRow[];
@@ -195,6 +206,10 @@ interface VoiceBiometricCheckRow {
   customAssetDetectionNotes: string | null;
   assetChecklistManualTicksJson: string | null;
   assetChecklistScore: number | null;
+  signageOcrStatus: string;
+  signageOcrChecklistJson: string | null;
+  signageOcrModel: string | null;
+  signageOcrNotes: string | null;
   checkedAt: string | null;
 }
 
@@ -204,6 +219,23 @@ interface AssetDetectionChecklistItem {
   confidence: number;
   thumbnail: string | null;
 }
+
+interface SignageOcrChecklistItem {
+  text: string;
+  confidence: number;
+  thumbnail: string | null;
+  isNeighborReference: boolean;
+}
+
+// Segment-appropriate label for readings tagged isNeighborReference — a
+// vocational student's premises is a training institute, not a shop, so
+// "Neighboring shops found" would read oddly there; a farmer's premises
+// doesn't fit either term well, so it falls back to the generic form.
+const NEIGHBOR_REFERENCE_LABEL: Record<SegmentCode, string> = {
+  BUSINESS_OWNER: "Neighboring shops found",
+  VOCATIONAL_STUDENT: "Neighboring institutes found",
+  FARMER: "Neighboring landmarks found",
+};
 
 const RISK_TONE: Record<string, "neutral" | "success" | "warning" | "danger"> = {
   none: "success", low: "neutral", medium: "warning", high: "danger",
@@ -219,6 +251,7 @@ const STATUS_TONE: Record<string, "neutral" | "success" | "warning" | "danger" |
 export default function CaseDetailPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
+  const brand = useTenantConfig();
   const [staff, setStaff] = useState<StaffMember | null>(null);
   const [data, setData] = useState<CaseDetailData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -340,7 +373,7 @@ export default function CaseDetailPage() {
           <Landmark className="h-5 w-5 shrink-0 text-white" />
           <div>
             <p className="text-sm font-bold text-white">Underwriter Workspace</p>
-            <p className="text-[11px] font-medium text-ink-300">Lakshya Skill Finance</p>
+            <p className="text-[11px] font-medium text-ink-300">{brand.displayName}</p>
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-3 text-xs text-ink-200">
@@ -524,6 +557,16 @@ export default function CaseDetailPage() {
         </Card>
       )}
 
+      {/* Credit Appraisal Memo — customer feedback from a live demo (Sept 9),
+          rebuilt to match DLP/LOS's own real, BRD-specified CAM (Appendix
+          E.3, BRD v1.23) rather than an independently-invented shape: an
+          IMMUTABLE snapshot generated on explicit request, never live-
+          regenerated, with every prior generation kept queryable — a
+          document used to justify/audit a sanction decision must reflect
+          what was actually known at that moment. See camSnapshot.ts's own
+          doc comment for the full field-mapping rationale. */}
+      {data.assignedUnderwriter && <CamCard caseId={data.id} staffName={staff.name} />}
+
       {/* Action panel */}
       <Card>
         <SectionTitle icon={<ShieldCheck className="h-4 w-4" />}>Action</SectionTitle>
@@ -698,6 +741,25 @@ function ActionPanel({
     setAiReasoning(reasoning);
   }
 
+  // Auto-draft as soon as the underwriter lands on their own review screen,
+  // rather than waiting for the manual "Draft recommendation" click below.
+  // Reported live: an underwriter who submitted without ever clicking that
+  // button left `aiReasoning` null, so combinedNotes() had nothing to
+  // attach — the approver's decision trail then showed only the
+  // underwriter's own free-text note with no AI reasoning at all, not
+  // because it was hidden, but because it was never generated. The manual
+  // button stays (re-running it after checking more evidence still makes
+  // sense), but the underwriter no longer has to remember to press it
+  // before every decision just for it to exist in the record at all. Still
+  // fully advisory and still never submits anything by itself — this only
+  // changes when the draft gets computed, not what it does.
+  useEffect(() => {
+    if (data.status === "UNDER_REVIEW" && staff.role === "UNDERWRITER" && staff.name === data.assignedUnderwriter && !aiReasoning) {
+      draftRecommendation();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data.id, data.status]);
+
   if (data.status === "APPROVED" || data.status === "REJECTED") {
     return <p className="text-sm text-ink-500 dark:text-ink-400">This case is closed — see the decision trail above.</p>;
   }
@@ -714,9 +776,26 @@ function ActionPanel({
           </p>
         )}
         {data.status === "VIDEOPD_SCHEDULED" && (
-          <p className="mb-3 text-sm text-ink-500 dark:text-ink-400">
-            A VideoPD link has been sent and the borrower hasn't completed it yet. You can claim and start reviewing the application now, or wait.
-          </p>
+          <div className="mb-3">
+            <p className="text-sm text-ink-500 dark:text-ink-400">
+              A VideoPD link has been sent and the borrower hasn't completed it yet. You can claim and start reviewing the application now, or wait.
+            </p>
+            {(() => {
+              const progress = getVideoPdProgressBadge(data.status, data.videoPdSession);
+              if (!progress) return null;
+              return (
+                <p className={cn("mt-1.5 flex items-center gap-1.5 text-xs font-semibold", progress.stalled ? "text-amber-600 dark:text-amber-400" : "text-ink-400")}>
+                  {progress.stalled && <AlertTriangle className="h-3.5 w-3.5 shrink-0" />}
+                  {progress.label}
+                  {data.videoPdSession && data.videoPdSession.reminderCount > 0 && (
+                    <span className="font-normal text-ink-400">
+                      · auto-reminded {data.videoPdSession.reminderCount}× (last {new Date(data.videoPdSession.lastReminderSentAt!).toLocaleString()})
+                    </span>
+                  )}
+                </p>
+              );
+            })()}
+          </div>
         )}
         {data.status === "VIDEOPD_COMPLETE" && (
           <p className="mb-3 text-sm text-sprout-600 dark:text-sprout-400">
@@ -791,12 +870,31 @@ function ActionPanel({
     }
     return (
       <div className="space-y-3">
-        <Textarea label="Notes (optional)" value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Reason for your decision…" />
+        <Textarea
+          label="Notes (optional for Approve/Reject — required to send back)"
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+          placeholder="Reason for your decision…"
+        />
         <VoiceCheckGate pending={voiceChecksPending} overridden={voiceCheckOverridden} onOverride={() => setVoiceCheckOverridden(true)}>
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <Button onClick={() => onApproverDecision("APPROVED", notesWithOverrideMarker())} loading={busy} icon={<CheckCircle2 className="h-4 w-4" />}>Approve</Button>
             <Button variant="outline" onClick={() => onApproverDecision("REJECTED", notesWithOverrideMarker())} loading={busy} icon={<XCircle className="h-4 w-4" />}>Reject</Button>
-            <Button variant="ghost" onClick={() => onApproverDecision("SENT_BACK", notes)} loading={busy} icon={<Undo2 className="h-4 w-4" />}>Send back</Button>
+            <Button
+              variant="ghost"
+              onClick={() => onApproverDecision("SENT_BACK", notes)}
+              loading={busy}
+              disabled={!notes.trim()}
+              icon={<Undo2 className="h-4 w-4" />}
+            >
+              Send back
+            </Button>
+            {/* Explains the disabled state rather than leaving a mysteriously
+                unclickable button — enforced for real server-side too (see
+                approver-decision/route.ts), this is UX, not the actual gate. */}
+            {!notes.trim() && (
+              <span className="text-[11px] text-ink-400">Add a note explaining what needs fixing before you can send this back.</span>
+            )}
           </div>
         </VoiceCheckGate>
       </div>
@@ -1221,6 +1319,8 @@ function VoiceBiometricsCard({
   const assetChecklist: AssetDetectionChecklistItem[] = check?.assetDetectionChecklistJson ? JSON.parse(check.assetDetectionChecklistJson) : [];
   const customAssetDetectionChecked = checked && check?.customAssetDetectionStatus !== "PENDING";
   const customAssetChecklist: AssetDetectionChecklistItem[] = check?.customAssetDetectionChecklistJson ? JSON.parse(check.customAssetDetectionChecklistJson) : [];
+  const signageOcrChecked = checked && check?.signageOcrStatus !== "PENDING";
+  const signageOcrChecklist: SignageOcrChecklistItem[] = check?.signageOcrChecklistJson ? JSON.parse(check.signageOcrChecklistJson) : [];
 
   return (
     <Card className="mb-5">
@@ -1459,6 +1559,47 @@ function VoiceBiometricsCard({
             </div>
           )}
 
+          {business && signageOcrChecked && check && (() => {
+            const ownSignage = signageOcrChecklist.filter((item) => !item.isNeighborReference);
+            const neighborReadings = signageOcrChecklist.filter((item) => item.isNeighborReference);
+            return (
+              <div className="mb-4">
+                <p className="mb-2 text-[11px] font-bold uppercase tracking-wide text-ink-400">Storefront &amp; signage text</p>
+                {ownSignage.length === 0 ? (
+                  <p className="mb-2 text-xs text-ink-400">No legible signage text found with reasonable confidence in the sampled frames.</p>
+                ) : (
+                  <div className="mb-2 space-y-1.5">
+                    {ownSignage.map((item, i) => (
+                      <SignageTextRow key={`${item.text}-${i}`} item={item} />
+                    ))}
+                  </div>
+                )}
+
+                {neighborReadings.length > 0 && (
+                  <div className="mb-2">
+                    <p className="mb-1.5 text-[11px] font-semibold text-ink-500 dark:text-ink-400">
+                      {NEIGHBOR_REFERENCE_LABEL[segment]}
+                    </p>
+                    <div className="space-y-1.5">
+                      {neighborReadings.map((item, i) => (
+                        <SignageTextRow key={`${item.text}-${i}`} item={item} neighbor />
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {check.signageOcrNotes && (
+                  <div className="rounded-xl bg-ink-50 p-2.5 dark:bg-ink-800/40">
+                    <p className="text-xs leading-snug text-ink-500 dark:text-ink-400">{check.signageOcrNotes}</p>
+                    {check.signageOcrModel && (
+                      <p className="mt-1 text-[10px] uppercase tracking-wide text-ink-300 dark:text-ink-600">Model: {check.signageOcrModel}</p>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
           {liveCall && liveCallChecked && check && (
             <div>
               <p className="mb-2 text-[11px] font-bold uppercase tracking-wide text-ink-400">Live call (Tier 1 — borrower-side audio only)</p>
@@ -1655,6 +1796,46 @@ function DetectionItemRow({ item, accent }: { item: AssetDetectionChecklistItem;
   );
 }
 
+// Same row shape as DetectionItemRow (thumbnail + label + confidence pill)
+// but built for a text READING rather than an object label — the string
+// itself can run to a full line ("Next to Krishna General Store"), so it
+// gets its own row rather than DetectionItemRow's truncate-and-capitalize
+// treatment, which assumes a short category name.
+function SignageTextRow({ item, neighbor = false }: { item: SignageOcrChecklistItem; neighbor?: boolean }) {
+  return (
+    <div
+      className={cn(
+        "flex items-center gap-3 rounded-xl border p-2",
+        neighbor ? "border-dashed border-amber-300 bg-amber-50/50 dark:border-amber-800 dark:bg-amber-950/10" : "border-ink-100 dark:border-ink-800"
+      )}
+    >
+      {item.thumbnail ? (
+        // A signage crop is wide/short (a line of text), not square like an
+        // object-detection thumbnail — object-contain on a wide box shows
+        // the whole reading instead of object-cover cropping most of it
+        // away to fill a square.
+        // eslint-disable-next-line @next/next/no-img-element -- a small base64 data URI crop, not worth next/image's overhead
+        <img src={item.thumbnail} alt={item.text} className="h-12 w-32 shrink-0 rounded-lg bg-ink-50 object-contain dark:bg-ink-800/60" />
+      ) : (
+        <div className="flex h-12 w-32 shrink-0 items-center justify-center rounded-lg bg-ink-100 dark:bg-ink-800">
+          <ScanText className="h-5 w-5 text-ink-300 dark:text-ink-600" />
+        </div>
+      )}
+      <p className={cn("min-w-0 flex-1 text-sm font-semibold leading-snug", neighbor ? "text-amber-700 dark:text-amber-400" : "text-ink-700 dark:text-ink-200")}>
+        &ldquo;{item.text}&rdquo;
+      </p>
+      <span
+        className={cn(
+          "shrink-0 rounded-full px-2 py-0.5 text-xs font-bold",
+          neighbor ? "bg-amber-100 text-amber-700 dark:bg-amber-950/30 dark:text-amber-400" : "bg-ink-100 text-ink-600 dark:bg-ink-800 dark:text-ink-300"
+        )}
+      >
+        {Math.round(item.confidence * 100)}%
+      </span>
+    </div>
+  );
+}
+
 function EvidenceCard({ evidence }: { evidence: EvidenceRow }) {
   const url = `/api/staff/evidence/${evidence.id}`;
   return (
@@ -1703,6 +1884,128 @@ function EvidenceCard({ evidence }: { evidence: EvidenceRow }) {
         )}
       </div>
     </div>
+  );
+}
+
+interface CamSnapshotMeta {
+  id: string;
+  generatedBy: string;
+  generatedAt: string;
+}
+
+/** Generate/view/download/history for the Credit Appraisal Memo — see the
+ * block comment where this is rendered for why this is an immutable-
+ * snapshot design, not a live-regenerated report. Shown any time from
+ * claim onward, not gated to a final decision — same "don't force a wait"
+ * reasoning as VoiceCheckGate elsewhere on this page; an underwriter
+ * mid-review may still want a working printout, and can generate another
+ * once more of the case has landed (a new snapshot, the old one still
+ * intact in history). */
+function CamCard({ caseId, staffName }: { caseId: string; staffName: string }) {
+  const [latest, setLatest] = useState<CamSnapshotMeta | null | undefined>(undefined); // undefined = still loading, null = none generated yet
+  const [history, setHistory] = useState<CamSnapshotMeta[] | null>(null);
+  const [showHistory, setShowHistory] = useState(false);
+  const [generating, setGenerating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const loadLatest = useCallback(async () => {
+    const res = await fetch(`/api/staff/case/${caseId}/cam`);
+    if (res.status === 404) { setLatest(null); return; }
+    setLatest(await res.json());
+  }, [caseId]);
+
+  useEffect(() => { loadLatest(); }, [loadLatest]);
+
+  async function generate() {
+    setGenerating(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/staff/case/${caseId}/cam`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ staffName }),
+      });
+      if (!res.ok) throw new Error((await res.json()).error ?? "Couldn't generate the CAM.");
+      await loadLatest();
+      if (showHistory) await loadHistory();
+    } catch (e: any) {
+      setError(e.message ?? "Couldn't generate the CAM.");
+    } finally {
+      setGenerating(false);
+    }
+  }
+
+  async function loadHistory() {
+    const res = await fetch(`/api/staff/case/${caseId}/cam/history`);
+    setHistory(await res.json());
+  }
+
+  return (
+    <Card className="mb-5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <SectionTitle icon={<FileText className="h-4 w-4" />}>Credit Appraisal Memo</SectionTitle>
+        <Button size="sm" variant="outline" loading={generating} onClick={generate} icon={<FileText className="h-3.5 w-3.5" />}>
+          Generate CAM
+        </Button>
+      </div>
+      <p className="mt-2 text-xs text-ink-400">
+        An immutable, point-in-time summary — identity, financials, risk flags, and both decisions. Each generation is a permanent, separately-kept snapshot, never overwritten; not digitally signed, advisory only.
+      </p>
+      {error && <p className="mt-2 text-xs font-medium text-red-500">{error}</p>}
+
+      {latest === undefined ? null : latest === null ? (
+        <p className="mt-3 text-xs text-ink-400">No CAM generated yet for this case.</p>
+      ) : (
+        <div className="mt-3 flex flex-wrap items-center gap-2 rounded-xl border border-ink-100 p-3 text-xs dark:border-ink-800">
+          <span className="text-ink-500 dark:text-ink-400">
+            Latest: {latest.generatedBy} · {new Date(latest.generatedAt).toLocaleString()}
+          </span>
+          <div className="ml-auto flex gap-2">
+            <a
+              href={`/api/staff/case/${caseId}/cam-pdf?snapshotId=${latest.id}&mode=inline`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-1.5 rounded-lg border border-ink-200 px-2.5 py-1.5 font-semibold text-ink-700 hover:bg-ink-50 dark:border-ink-700 dark:text-ink-200 dark:hover:bg-ink-800"
+            >
+              <Eye className="h-3.5 w-3.5" /> View
+            </a>
+            <a
+              href={`/api/staff/case/${caseId}/cam-pdf?snapshotId=${latest.id}`}
+              className="flex items-center gap-1.5 rounded-lg bg-ink-900 px-2.5 py-1.5 font-semibold text-white hover:bg-ink-800 dark:bg-white dark:text-ink-900 dark:hover:bg-ink-100"
+            >
+              <FileDown className="h-3.5 w-3.5" /> Download
+            </a>
+          </div>
+        </div>
+      )}
+
+      {latest !== null && latest !== undefined && (
+        <button
+          type="button"
+          onClick={() => { const next = !showHistory; setShowHistory(next); if (next && !history) loadHistory(); }}
+          className="mt-2 text-xs font-semibold text-ink-400 underline decoration-dotted underline-offset-2 hover:text-ink-600 dark:hover:text-ink-200"
+        >
+          {showHistory ? "Hide" : "Show"} generation history
+        </button>
+      )}
+      {showHistory && history && (
+        <div className="mt-2 space-y-1.5">
+          {history.map((h) => (
+            <div key={h.id} className="flex items-center justify-between gap-2 rounded-lg bg-ink-50 px-2.5 py-1.5 text-xs dark:bg-ink-800/40">
+              <span className="text-ink-500 dark:text-ink-400">{h.generatedBy} · {new Date(h.generatedAt).toLocaleString()}</span>
+              <a
+                href={`/api/staff/case/${caseId}/cam-pdf?snapshotId=${h.id}&mode=inline`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex shrink-0 items-center gap-1 font-semibold text-ink-600 hover:underline dark:text-ink-300"
+              >
+                <Eye className="h-3 w-3" /> View
+              </a>
+            </div>
+          ))}
+        </div>
+      )}
+    </Card>
   );
 }
 

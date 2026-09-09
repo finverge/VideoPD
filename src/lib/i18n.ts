@@ -126,6 +126,24 @@ export const translations: Record<LangCode, Dict> = {
     consentMediaCapture: "I consent to photo/video evidence being captured and securely stored.",
     uploadIdProof: "ID proof",
     uploadIdProofHelp: "Aadhaar, PAN, Voter ID, or Driving Licence",
+    // New for Aadhaar QR auto-fill (see src/lib/aadhaarQr.ts) — English
+    // only for now, same as every other newly-added key in this file:
+    // t()'s own fallback (see its doc comment) shows English rather than
+    // breaking for the other 5 languages, but these still need real
+    // native-speaker translation before this feature goes live in a
+    // non-English session, per this file's own header warning.
+    aadhaarAutoFillTitle: "Have your Aadhaar handy?",
+    aadhaarAutoFillBody: "Upload a photo of your Aadhaar card and we'll fill in your name, date of birth, and address for you — you can still review and correct anything before continuing.",
+    aadhaarAutoFillAction: "Upload Aadhaar to auto-fill",
+    aadhaarAutoFillSkip: "I'll enter my details manually",
+    aadhaarAutoFillWorking: "Reading your Aadhaar card…",
+    aadhaarAutoFillSuccess: "Filled in from your Aadhaar — please check these are correct. We've also saved this photo as your ID and address proof, so you won't be asked to upload it again — you can still change either later.",
+    // Deliberately more cautious wording than the QR success message above —
+    // this path (aadhaarOcr.ts) reads printed text, not the QR's structured
+    // data, and misreads on a photographed card are genuinely more common.
+    aadhaarAutoFillSuccessOcr: "Read some details from your Aadhaar photo — OCR can misread characters, so please check every field carefully before continuing. We've also saved this photo as your ID and address proof — you can still change either later.",
+    aadhaarAutoFillNotFound: "We couldn't read your Aadhaar from that photo — no problem, just fill in your details below.",
+    aadhaarAutoFillDismiss: "Dismiss",
     uploadAddressProof: "Address proof",
     uploadAddressProofHelp: "Utility bill, bank statement, or ration card",
     uploadBusinessPhoto: "Photo of your workplace",

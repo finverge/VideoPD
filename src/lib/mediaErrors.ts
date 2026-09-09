@@ -25,6 +25,8 @@ export function describeGetUserMediaError(name: string | undefined): string {
       return "No camera or microphone was found on this device.";
     case "OverconstrainedError":
       return "This device's camera doesn't support what's needed here.";
+    case "TimeoutError":
+      return "Your camera didn't respond — it may still be in use by another tab or app on this device. Close anything else that might have it open and try again.";
     default:
       return "Couldn't access a camera on this device.";
   }

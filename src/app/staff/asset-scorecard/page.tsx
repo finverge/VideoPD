@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/Button";
 import { Input, Textarea } from "@/components/ui/Input";
 import { cn } from "@/lib/utils";
 import { getStoredStaff, clearStoredStaff, type StaffMember } from "@/lib/staffAuth";
+import { useTenantConfig } from "@/lib/TenantConfigProvider";
 import {
   ASSET_DETECTION_CATEGORIES, ASSET_DETECTION_DEFAULT_MANUAL_ITEMS_BY_SEGMENT,
 } from "@/lib/assetDetectionCategories";
@@ -88,6 +89,7 @@ function parseWeights(json: string | null): Record<string, number> {
 // on /staff/risk-parameters (app-wide, not a content decision).
 export default function AssetScorecardPage() {
   const router = useRouter();
+  const brand = useTenantConfig();
   const [staff, setStaff] = useState<StaffMember | null>(null);
   const [segment, setSegment] = useState<SegmentCode>("FARMER");
 
@@ -288,7 +290,7 @@ export default function AssetScorecardPage() {
           <Boxes className="h-5 w-5 shrink-0 text-white" />
           <div>
             <p className="text-sm font-bold text-white">Asset Scorecard</p>
-            <p className="text-[11px] font-medium text-ink-300">Lakshya Skill Finance</p>
+            <p className="text-[11px] font-medium text-ink-300">{brand.displayName}</p>
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-3 text-xs text-ink-200">

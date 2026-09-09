@@ -8,7 +8,9 @@ import { Badge } from "@/components/ui/Badge";
 import { Input, Select } from "@/components/ui/Input";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { getStoredStaff, clearStoredStaff, type StaffMember } from "@/lib/staffAuth";
-import { formatINR } from "@/lib/utils";
+import { useTenantConfig } from "@/lib/TenantConfigProvider";
+import { getVideoPdProgressBadge } from "@/lib/videoPdStall";
+import { formatINR, cn } from "@/lib/utils";
 import type { SegmentCode } from "@/types";
 
 interface CaseListItem {
@@ -25,6 +27,7 @@ interface CaseListItem {
     requestedAmount: number | null;
     borrower: { mobile: string };
   };
+  videoPdSession: { status: string; currentStep: number; linkSentAt: string; startedAt: string | null } | null;
 }
 
 // VIDEOPD_SCHEDULED and VIDEOPD_COMPLETE were missing here — same gap the
@@ -72,6 +75,7 @@ const RISK_TONE: Record<string, "neutral" | "success" | "warning" | "danger"> = 
 
 export default function StaffQueuePage() {
   const router = useRouter();
+  const brand = useTenantConfig();
   const [staff, setStaff] = useState<StaffMember | null>(null);
   const [cases, setCases] = useState<CaseListItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -151,7 +155,7 @@ export default function StaffQueuePage() {
           <Landmark className="h-5 w-5 shrink-0 text-white" />
           <div>
             <p className="text-sm font-bold text-white">Underwriter Workspace</p>
-            <p className="text-[11px] font-medium text-ink-300">Lakshya Skill Finance</p>
+            <p className="text-[11px] font-medium text-ink-300">{brand.displayName}</p>
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-3 text-xs text-ink-200">
@@ -294,6 +298,15 @@ export default function StaffQueuePage() {
                   </td>
                   <td className="px-4 py-3">
                     <Badge tone={STATUS_TONE[c.status] ?? "neutral"}>{c.status.replace(/_/g, " ")}</Badge>
+                    {(() => {
+                      const progress = getVideoPdProgressBadge(c.status, c.videoPdSession);
+                      if (!progress) return null;
+                      return (
+                        <p className={cn("mt-1 text-[11px] font-medium", progress.stalled ? "text-amber-600 dark:text-amber-400" : "text-ink-400")}>
+                          {progress.label}
+                        </p>
+                      );
+                    })()}
                   </td>
                   <td className="px-4 py-3 text-xs text-ink-500 dark:text-ink-400">
                     {/* Terminal states show who made the final call; anything still in

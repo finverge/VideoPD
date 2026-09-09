@@ -32,6 +32,11 @@ import { runVoiceCheck } from "@/lib/runVoiceCheck";
 //      the segment's own configured object names in real time (zero-shot,
 //      no training) rather than being limited to the first detector's
 //      fixed 80-category vocabulary.
+//   5. Signage OCR (admin-toggleable — see voice-service/signage_ocr.py):
+//      reads text off signboards/hoardings/neighboring storefronts in
+//      VIDEOPD_BUSINESS_VERIFICATION — genuinely different from #4, which
+//      detects object presence, not printed text. Advisory checklist,
+//      same as #4.
 // The actual pipeline lives in src/lib/runVoiceCheck.ts, shared with the
 // call-end auto-trigger.
 export async function GET(_req: NextRequest, { params }: { params: Promise<{ applicationId: string }> }) {
@@ -50,7 +55,8 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ ap
   return NextResponse.json({
     check: rest.check, ...rest.responseBody,
     guidedFlowError: rest.guidedFlowError, liveCallError: rest.liveCallError, deepfakeError: rest.deepfakeError, lipSyncError: rest.lipSyncError,
-    assetDetectionError: rest.assetDetectionError, customAssetDetectionError: rest.customAssetDetectionError,
+    assetDetectionError: rest.assetDetectionError, customAssetDetectionError: rest.customAssetDetectionError, signageOcrError: rest.signageOcrError,
     deepfakeCheckEnabled: rest.deepfakeCheckEnabled, lipSyncCheckEnabled: rest.lipSyncCheckEnabled, assetDetectionCheckEnabled: rest.assetDetectionCheckEnabled,
+    signageOcrCheckEnabled: rest.signageOcrCheckEnabled,
   });
 }

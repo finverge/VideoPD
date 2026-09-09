@@ -4,7 +4,7 @@ import type { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import {
   checkVoiceConsistency, checkMultiSpeaker, checkDeepfake, checkLipSync,
-  checkAssetDetection, checkCustomAssetDetection, voiceServiceHealthy,
+  checkAssetDetection, checkCustomAssetDetection, checkSignageOcr, voiceServiceHealthy,
 } from "@/lib/voiceBiometrics";
 import {
   voiceConsistencyRiskFlag, multiSpeakerRiskFlag,
@@ -51,10 +51,14 @@ export interface RunVoiceCheckOptions {
    * premises video, nothing to detect assets in. Same defaulting as
    * runDeepfake/runLipSync. */
   runAssetDetection?: boolean;
+  /** Storefront/signage text recognition (EasyOCR) of the business-
+   * verification clip only — same scope as runAssetDetection, genuinely
+   * different check (reads text, not object presence). Same defaulting. */
+  runSignageOcr?: boolean;
 }
 
 export type RunVoiceCheckResult =
-  | { ok: true; check: unknown; responseBody: Record<string, unknown>; guidedFlowError: string | null; liveCallError: string | null; deepfakeError: string | null; lipSyncError: string | null; assetDetectionError: string | null; customAssetDetectionError: string | null; deepfakeCheckEnabled: boolean; lipSyncCheckEnabled: boolean; assetDetectionCheckEnabled: boolean }
+  | { ok: true; check: unknown; responseBody: Record<string, unknown>; guidedFlowError: string | null; liveCallError: string | null; deepfakeError: string | null; lipSyncError: string | null; assetDetectionError: string | null; customAssetDetectionError: string | null; signageOcrError: string | null; deepfakeCheckEnabled: boolean; lipSyncCheckEnabled: boolean; assetDetectionCheckEnabled: boolean; signageOcrCheckEnabled: boolean }
   | { ok: false; error: string; status: number };
 
 async function readEvidenceBuffer(filePath: string): Promise<Buffer | null> {
@@ -71,6 +75,7 @@ export async function runVoiceCheck(applicationId: string, opts: RunVoiceCheckOp
   const runDeepfake = (opts.runDeepfake ?? featureSettings.deepfakeCheckEnabled) && featureSettings.deepfakeCheckEnabled;
   const runLipSync = (opts.runLipSync ?? featureSettings.lipSyncCheckEnabled) && featureSettings.lipSyncCheckEnabled;
   const runAssetDetection = (opts.runAssetDetection ?? featureSettings.assetDetectionCheckEnabled) && featureSettings.assetDetectionCheckEnabled;
+  const runSignageOcr = (opts.runSignageOcr ?? featureSettings.signageOcrCheckEnabled) && featureSettings.signageOcrCheckEnabled;
 
   const healthy = await voiceServiceHealthy();
   if (!healthy) {
@@ -94,7 +99,10 @@ export async function runVoiceCheck(applicationId: string, opts: RunVoiceCheckOp
   // liveness-clip counterpart, the selfie-step recording isn't a premises
   // video, nothing to detect assets in.
   const canCheckAssetDetection = runAssetDetection && !!businessEvidence;
-  if (!canCheckGuidedFlow && !canCheckLiveCall && !canCheckDeepfakeOrLipSync && !canCheckAssetDetection) {
+  // Signage OCR scans the business-verification clip only, same reasoning
+  // as asset detection — no liveness-clip counterpart.
+  const canCheckSignageOcr = runSignageOcr && !!businessEvidence;
+  if (!canCheckGuidedFlow && !canCheckLiveCall && !canCheckDeepfakeOrLipSync && !canCheckAssetDetection && !canCheckSignageOcr) {
     return { ok: false, error: "Nothing to check yet — need either both guided-flow recordings, or a live-call recording.", status: 422 };
   }
 
@@ -105,7 +113,7 @@ export async function runVoiceCheck(applicationId: string, opts: RunVoiceCheckOp
   const needLivenessBuf = canCheckGuidedFlow || canCheckDeepfakeOrLipSync || canCheckLiveCall;
   const [livenessBuf, businessBuf, liveCallBuf] = await Promise.all([
     livenessEvidence && needLivenessBuf ? readEvidenceBuffer(livenessEvidence.filePath) : Promise.resolve(null),
-    businessEvidence && (canCheckGuidedFlow || canCheckDeepfakeOrLipSync || canCheckAssetDetection) ? readEvidenceBuffer(businessEvidence.filePath) : Promise.resolve(null),
+    businessEvidence && (canCheckGuidedFlow || canCheckDeepfakeOrLipSync || canCheckAssetDetection || canCheckSignageOcr) ? readEvidenceBuffer(businessEvidence.filePath) : Promise.resolve(null),
     liveCallEvidence ? readEvidenceBuffer(liveCallEvidence.filePath) : Promise.resolve(null),
   ]);
 
@@ -346,9 +354,37 @@ export async function runVoiceCheck(applicationId: string, opts: RunVoiceCheckOp
     }
   }
 
+  // --- Storefront & signage text recognition (signage_ocr.py) — a real
+  // capability check with a checklist result, not a risk check: no
+  // PASSED/FLAGGED verdict, nothing folded into riskFlags, same reasoning
+  // as the asset-detection block above. Genuinely independent of it: this
+  // reads TEXT off signboards, the asset checklist detects OBJECT
+  // PRESENCE — deliberately kept as its own gate/toggle rather than
+  // folded into canCheckAssetDetection, so either can be turned off
+  // without touching the other. ---
+  let signageOcrError: string | null = null;
+  if (canCheckSignageOcr) {
+    if (!businessBuf) {
+      signageOcrError = "The business-verification recording file is missing on disk.";
+    } else {
+      const signageResult = await checkSignageOcr(businessBuf, businessEvidence!.fileName, businessEvidence!.mimeType);
+      if (!signageResult.ok) {
+        signageOcrError = signageResult.error;
+      } else if (signageResult.data.insufficientFrames) {
+        // nothing usable extracted — leave PENDING rather than claim a checklist
+      } else {
+        updateData.signageOcrStatus = "PASSED";
+        updateData.signageOcrChecklistJson = JSON.stringify(signageResult.data.checklist);
+        updateData.signageOcrModel = signageResult.data.model;
+        updateData.signageOcrNotes = signageResult.data.note;
+        responseBody.signageOcr = signageResult.data;
+      }
+    }
+  }
+
   if (Object.keys(updateData).length <= 1) {
     // Only checkedAt got set — every attempted check failed outright.
-    return { ok: false, error: [guidedFlowError, liveCallError, assetDetectionError, customAssetDetectionError].filter(Boolean).join(" ") || "Voice check failed.", status: 502 };
+    return { ok: false, error: [guidedFlowError, liveCallError, assetDetectionError, customAssetDetectionError, signageOcrError].filter(Boolean).join(" ") || "Voice check failed.", status: 502 };
   }
 
   const check = await db.voiceBiometricCheck.upsert({
@@ -410,8 +446,8 @@ export async function runVoiceCheck(applicationId: string, opts: RunVoiceCheckOp
   }
 
   return {
-    ok: true, check, responseBody, guidedFlowError, liveCallError, deepfakeError, lipSyncError, assetDetectionError, customAssetDetectionError,
+    ok: true, check, responseBody, guidedFlowError, liveCallError, deepfakeError, lipSyncError, assetDetectionError, customAssetDetectionError, signageOcrError,
     deepfakeCheckEnabled: featureSettings.deepfakeCheckEnabled, lipSyncCheckEnabled: featureSettings.lipSyncCheckEnabled,
-    assetDetectionCheckEnabled: featureSettings.assetDetectionCheckEnabled,
+    assetDetectionCheckEnabled: featureSettings.assetDetectionCheckEnabled, signageOcrCheckEnabled: featureSettings.signageOcrCheckEnabled,
   };
 }

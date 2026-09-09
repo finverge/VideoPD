@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { generateDossierPdf, type DossierPdfInput } from "@/lib/dossierPdf";
+import { getTenantConfig } from "@/lib/tenantConfig";
 
 export async function GET(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -14,7 +15,9 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
   }
 
   const dossier = JSON.parse(lead.videoPdSession.dossierJson);
+  const tenant = await getTenantConfig();
   const input: DossierPdfInput = {
+    tenantName: tenant.displayName,
     applicantName: lead.application.fullName || "—",
     mobile: "", // filled below via a second query to avoid a wider include on the hot path
     segment: lead.application.segment,

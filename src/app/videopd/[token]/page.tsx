@@ -5,7 +5,7 @@ import { useParams } from "next/navigation";
 import { AnimatePresence, motion } from "framer-motion";
 import { AlertTriangle, Camera, CheckCircle2, FileUp, Loader2, Mic, MicOff, ShieldCheck, Upload } from "lucide-react";
 import { CameraCapture, type LivenessCaptureResult } from "@/components/CameraCapture";
-import { LiveCallRoom } from "@/components/LiveCallRoom";
+import { LiveCallRoom, type LiveCallRoomHandle } from "@/components/LiveCallRoom";
 import { descriptorFromIdProofUrl, compareFaceDescriptors, isSamePerson } from "@/lib/faceMatch";
 import { LakshyaLogo } from "@/components/BrandHeader";
 import { ThemeToggle } from "@/components/ThemeToggle";
@@ -42,6 +42,28 @@ export default function VideoPdSessionPage() {
   const [questions, setQuestions] = useState<DbQuestion[]>([]);
   const [qIndex, setQIndex] = useState(0);
   const [showLiveCall, setShowLiveCall] = useState(false);
+  const [endingCall, setEndingCall] = useState(false);
+  const liveCallRef = useRef<LiveCallRoomHandle>(null);
+
+  // If a live call is still open when the borrower moves on, force it
+  // closed first rather than relying only on the implicit unmount cleanup
+  // (LiveCallRoom → useCallRoom's own effect). Unmounting works too, but it
+  // gives no guarantee the next step's own getUserMedia() call — in
+  // CaptureStep's CameraCapture, right below — waits for the camera to
+  // actually finish releasing first. Reported live as a stuck "record
+  // video" spinner even outside the two-tabs-one-machine case this also
+  // covers; see acquireCameraStream's retry/backoff in CameraCapture.tsx
+  // for the other half of the same real race.
+  async function leaveLiveCallIfOpen() {
+    if (liveCallRef.current?.isJoined()) {
+      setEndingCall(true);
+      try {
+        await liveCallRef.current.forceLeave();
+      } finally {
+        setEndingCall(false);
+      }
+    }
+  }
 
   // Advances the visible step *and* persists it, so a mid-session reload
   // resumes here instead of restarting at "welcome" (see docs/
@@ -117,7 +139,16 @@ export default function VideoPdSessionPage() {
             <ShieldCheck className="mx-auto mb-4 h-10 w-10 text-sprout-500" />
             <h1 className="mb-2 text-center text-2xl font-extrabold tracking-tight text-ink-900 dark:text-white">{t(lang, "vpdWelcomeTitle")}</h1>
             <p className="mb-6 text-center text-sm text-ink-500 dark:text-ink-400">{t(lang, "vpdWelcomeBody")}</p>
-            <Button className="w-full" onClick={() => advanceStep("liveness")}>{t(lang, "vpdStart")}</Button>
+            <Button
+              className="w-full"
+              loading={endingCall}
+              onClick={async () => {
+                await leaveLiveCallIfOpen();
+                advanceStep("liveness");
+              }}
+            >
+              {endingCall ? "Ending call…" : t(lang, "vpdStart")}
+            </Button>
 
             {/* Real, self-hosted live video call with the loan officer —
                 separate from the recorded steps below; doesn't touch
@@ -125,6 +156,7 @@ export default function VideoPdSessionPage() {
             <div className="mt-4 border-t border-ink-100 pt-4 dark:border-ink-800">
               {showLiveCall ? (
                 <LiveCallRoom
+                  ref={liveCallRef}
                   roomId={params.token}
                   displayName="Borrower"
                   analyzeLiveness
@@ -303,6 +335,10 @@ function CaptureStep({
         <CameraCapture
           mode={mode}
           facingMode={facingMode}
+          // Liveness must stay on the borrower's own face — flipping to the
+          // back camera mid-check would leave nothing to analyze. Every
+          // other CaptureStep use (business verification) is free to flip.
+          allowFlip={!analyzeLiveness}
           analyzeLiveness={analyzeLiveness}
           onLivenessResult={(result) => { livenessResultRef.current = result; }}
           onCapture={handleCapture}

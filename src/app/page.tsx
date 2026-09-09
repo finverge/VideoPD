@@ -346,10 +346,6 @@ export default function LandingPage() {
         </div>
       </div>
 
-      <a href="/staff" className="mt-10 self-center text-[11px] font-medium text-ink-300 hover:text-ink-500 dark:text-ink-600 dark:hover:text-ink-400">
-        Staff sign-in
-      </a>
-
       <AnimatePresence>
         {duplicateConflict && (
           <motion.div

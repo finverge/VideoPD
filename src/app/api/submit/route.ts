@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { runAutoAnalysis, riskSeverityOf } from "@/lib/mockChecks";
-import { getRiskParameters } from "@/lib/riskParameters";
-import type { InitialSummary } from "@/types";
+import { getSkillFinanceRiskThresholds, FALLBACK_RISK_THRESHOLDS } from "@/lib/dlpBre";
+import { startSkillFinanceCase } from "@/lib/dlpWorkflow";
+import type { InitialSummary, SegmentCode } from "@/types";
 
 const REQUIRED_EVIDENCE_TYPES = ["ID_PROOF", "ADDRESS_PROOF", "SELFIE"] as const;
 
@@ -88,7 +89,14 @@ export async function POST(req: NextRequest) {
         },
       })
     : 0;
-  const riskParameters = await getRiskParameters(application.segment);
+  // Phase 2 (DLP/LOS integration) — thresholds now come from DLP's real
+  // BRE (`SkillFinanceRiskGate` DMN decision, live-editable in Admin
+  // Portal), not a local Prisma row. If DLP's Flowable is unreachable,
+  // fall back to the last-known-good defaults rather than failing this
+  // borrower's submission — same graceful-degradation contract DLP's own
+  // dmn_client.py uses for every other DMN call on the platform.
+  const riskParameters =
+    (await getSkillFinanceRiskThresholds(application.segment as SegmentCode)) ?? FALLBACK_RISK_THRESHOLDS;
   const { riskFlags, completenessScore } = runAutoAnalysis({
     fields: application as unknown as Record<string, unknown>,
     evidenceCount: application.evidence.length,
@@ -130,7 +138,20 @@ export async function POST(req: NextRequest) {
     include: { summary: true },
   });
 
-  await db.loanApplication.update({ where: { id: applicationId }, data: { status: "ANALYZED" } });
+  // Phase 3 (DLP/LOS integration) — start this segment's real BPMN
+  // case-lifecycle process in DLP's Flowable engine, purely for
+  // Flowable-side visibility/audit trail. Started here (after the Lead
+  // exists) rather than earlier, so businessKey=applicationId always has
+  // a real Lead behind it by the time any bridge resolves it. Same
+  // graceful degradation as everywhere else: a null instance id (Flowable
+  // unreachable, process not deployed) never blocks the submission —
+  // Lead.status stays this app's own source of truth regardless.
+  const workflowProcessInstanceId = await startSkillFinanceCase(applicationId, application.segment as SegmentCode);
+
+  await db.loanApplication.update({
+    where: { id: applicationId },
+    data: { status: "ANALYZED", workflowProcessInstanceId },
+  });
 
   return NextResponse.json({ lead, summary });
 }

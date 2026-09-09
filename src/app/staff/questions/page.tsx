@@ -21,6 +21,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Input, Select, Textarea } from "@/components/ui/Input";
 import { getStoredStaff, clearStoredStaff, type StaffMember } from "@/lib/staffAuth";
+import { useTenantConfig } from "@/lib/TenantConfigProvider";
 import { cn } from "@/lib/utils";
 import type { SegmentCode } from "@/types";
 
@@ -61,6 +62,7 @@ const STATUS_TONE: Record<string, "neutral" | "success" | "warning" | "danger"> 
 
 export default function QuestionsAdminPage() {
   const router = useRouter();
+  const brand = useTenantConfig();
   const [staff, setStaff] = useState<StaffMember | null>(null);
   const [questions, setQuestions] = useState<QuestionRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -99,7 +101,7 @@ export default function QuestionsAdminPage() {
           <Landmark className="h-5 w-5 shrink-0 text-white" />
           <div>
             <p className="text-sm font-bold text-white">VideoPD Question Bank</p>
-            <p className="text-[11px] font-medium text-ink-300">Lakshya Skill Finance</p>
+            <p className="text-[11px] font-medium text-ink-300">{brand.displayName}</p>
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-3 text-xs text-ink-200">

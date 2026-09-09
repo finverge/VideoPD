@@ -2,54 +2,34 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { AlertTriangle, ArrowLeft, Boxes, CheckCircle2, ChevronRight, Clock, Info, Landmark, Loader2, LogOut, Save, ScanFace } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Boxes, CheckCircle2, ChevronRight, Clock, ExternalLink, Info, Landmark, Loader2, LogOut, Palette, Save, ScanFace, ScanText, SlidersHorizontal } from "lucide-react";
 import { Card } from "@/components/ui/Card";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { cn } from "@/lib/utils";
 import { getStoredStaff, clearStoredStaff, type StaffMember } from "@/lib/staffAuth";
-import type { SegmentCode } from "@/types";
+import { useTenantConfig } from "@/lib/TenantConfigProvider";
 
-interface RiskParametersData {
-  maxLoanToIncomeMultiple: number;
-  assumedAnnualInterestRatePct: number;
-  maxEmiToIncomeRatioPct: number;
-  updatedBy: string | null;
-  updatedAt: string;
-}
+// DLP/LOS integration Phase 2 — the segment risk-threshold editor that used
+// to live on this page (max loan-to-income multiple, assumed rate, max
+// EMI-to-income ratio, one form per segment) is retired. Those numbers are
+// now the `SkillFinanceRiskGate` DMN decision, authored and versioned in
+// DLP's own Admin Portal (Decision Table Designer) and evaluated live by
+// DLP's Flowable DMN engine on every submission (src/lib/dlpBre.ts) —
+// editable there without a VideoPD deploy, same seam BR-43 always asked
+// for, just backed by DLP's real BRE instead of a local Prisma row.
+// src/lib/riskParameters.ts's DEFAULT_RISK_PARAMETERS/getRiskParameters
+// are kept only as the last-known-good fallback values dlpBre.ts falls
+// back to if DLP's Flowable is unreachable — not the live source of truth
+// any more.
+const DLP_ADMIN_PORTAL_URL = process.env.NEXT_PUBLIC_DLP_ADMIN_PORTAL_URL ?? "http://localhost:5175";
 
-const SEGMENTS: { value: SegmentCode; label: string }[] = [
-  { value: "FARMER", label: "Farmer" },
-  { value: "VOCATIONAL_STUDENT", label: "Vocational student" },
-  { value: "BUSINESS_OWNER", label: "Business owner" },
-];
-
-// Honest, not invented: these two segments have genuinely different income
-// shapes than the EMI-to-income check assumes (a stable monthly figure) —
-// worth flagging to whoever's calibrating these, not a claim about what the
-// right number is.
-const SEGMENT_NOTES: Partial<Record<SegmentCode, string>> = {
-  FARMER: "Farm income is typically seasonal/harvest-cycle, not a stable monthly figure — the EMI-to-income check below assumes monthly income and may not fit well here without Lakshya's own seasonal-income convention.",
-  VOCATIONAL_STUDENT: "A vocational student applicant often has no current income at all (the loan is against future earning potential or a guarantor) — if monthly income is blank or zero, the EMI-affordability check is skipped entirely for that application rather than flagging on a meaningless ratio.",
-};
-
-// BR-43's "configurable against a lending partner's own credit parameters"
-// — real, staff-editable numbers (src/lib/riskParameters.ts), seeded with
-// generic industry-standard microfinance/NBFC defaults, not Lakshya's own
-// calibrated risk appetite (BRD Section 12, an explicit external
-// dependency). Segment-specific, not one global set, since farm/student/
-// business income genuinely work differently (see SEGMENT_NOTES above) —
-// each segment is independently editable, all three start from the same
-// generic numbers because there's no rigorous basis yet to invent different
-// starting values. This page is exactly the intended seam: Lakshya provides
-// their real numbers during UAT or in production, an Approver enters them
-// here per segment, and every subsequent application in that segment is
-// scored against them — no engineering change, no redeploy.
 interface FeatureSettingsData {
   deepfakeCheckEnabled: boolean;
   lipSyncCheckEnabled: boolean;
   assetDetectionCheckEnabled: boolean;
+  signageOcrCheckEnabled: boolean;
   // How many days a draft application still blocks/offers a resume prompt
   // on the landing page's duplicate-application check
   // (api/application/duplicate-check) before a fresh one can start
@@ -62,14 +42,8 @@ interface FeatureSettingsData {
 
 export default function RiskParametersPage() {
   const router = useRouter();
+  const brand = useTenantConfig();
   const [staff, setStaff] = useState<StaffMember | null>(null);
-  const [segment, setSegment] = useState<SegmentCode>("FARMER");
-  const [data, setData] = useState<RiskParametersData | null>(null);
-  const [defaults, setDefaults] = useState<Omit<RiskParametersData, "updatedBy" | "updatedAt"> | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
   // Feature-settings — separate model/endpoint (not segment-scoped, see
   // src/lib/featureSettings.ts), loaded once. Requested live: the
@@ -83,25 +57,11 @@ export default function RiskParametersPage() {
   const [featureSaved, setFeatureSaved] = useState(false);
   const [featureError, setFeatureError] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setSaved(false);
-    const res = await fetch(`/api/staff/risk-parameters?segment=${segment}`);
-    const json = await res.json();
-    setData(json.riskParameters);
-    setDefaults(json.defaults);
-    setLoading(false);
-  }, [segment]);
-
   useEffect(() => {
     const s = getStoredStaff();
     if (!s) { router.replace("/staff"); return; }
     setStaff(s);
   }, [router]);
-
-  useEffect(() => {
-    if (staff) load();
-  }, [staff, load]);
 
   useEffect(() => {
     if (!staff) return;
@@ -124,7 +84,7 @@ export default function RiskParametersPage() {
   // endpoint saves the whole FeatureSettings row at once, so every caller
   // sends its own changed field(s) plus whatever's already in state for
   // the rest, rather than separate save paths drifting apart.
-  async function saveFeatureSettings(patch: Partial<Pick<FeatureSettingsData, "deepfakeCheckEnabled" | "lipSyncCheckEnabled" | "assetDetectionCheckEnabled" | "applicationExpiryDays">>) {
+  async function saveFeatureSettings(patch: Partial<Pick<FeatureSettingsData, "deepfakeCheckEnabled" | "lipSyncCheckEnabled" | "assetDetectionCheckEnabled" | "signageOcrCheckEnabled" | "applicationExpiryDays">>) {
     if (!featureSettings || !staff) return;
     setFeatureError(null);
     setFeatureSaving(true);
@@ -138,6 +98,7 @@ export default function RiskParametersPage() {
           deepfakeCheckEnabled: featureSettings.deepfakeCheckEnabled,
           lipSyncCheckEnabled: featureSettings.lipSyncCheckEnabled,
           assetDetectionCheckEnabled: featureSettings.assetDetectionCheckEnabled,
+          signageOcrCheckEnabled: featureSettings.signageOcrCheckEnabled,
           applicationExpiryDays: featureSettings.applicationExpiryDays,
           ...patch,
         }),
@@ -153,46 +114,11 @@ export default function RiskParametersPage() {
       setFeatureSaving(false);
     }
   }
-  function handleFeatureToggle(field: "deepfakeCheckEnabled" | "lipSyncCheckEnabled" | "assetDetectionCheckEnabled", enabled: boolean) {
+  function handleFeatureToggle(field: "deepfakeCheckEnabled" | "lipSyncCheckEnabled" | "assetDetectionCheckEnabled" | "signageOcrCheckEnabled", enabled: boolean) {
     saveFeatureSettings({ [field]: enabled });
   }
 
-  async function handleSave() {
-    if (!data || !staff) return;
-    setError(null);
-    setSaving(true);
-    setSaved(false);
-    try {
-      const res = await fetch("/api/staff/risk-parameters", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          segment,
-          staffName: staff.name,
-          staffRole: staff.role,
-          maxLoanToIncomeMultiple: data.maxLoanToIncomeMultiple,
-          assumedAnnualInterestRatePct: data.assumedAnnualInterestRatePct,
-          maxEmiToIncomeRatioPct: data.maxEmiToIncomeRatioPct,
-        }),
-      });
-      const json = await res.json();
-      if (!res.ok) throw new Error(json.error);
-      setData(json.riskParameters);
-      setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
-    } catch (e: any) {
-      setError(e.message ?? "Something went wrong.");
-    } finally {
-      setSaving(false);
-    }
-  }
-
   if (!staff) return null;
-  const isDefault = defaults && data && (
-    data.maxLoanToIncomeMultiple === defaults.maxLoanToIncomeMultiple &&
-    data.assumedAnnualInterestRatePct === defaults.assumedAnnualInterestRatePct &&
-    data.maxEmiToIncomeRatioPct === defaults.maxEmiToIncomeRatioPct
-  );
 
   return (
     <main className="mx-auto min-h-screen max-w-2xl px-5 py-6 sm:px-6 sm:py-8">
@@ -204,7 +130,7 @@ export default function RiskParametersPage() {
           <Landmark className="h-5 w-5 shrink-0 text-white" />
           <div>
             <p className="text-sm font-bold text-white">Risk Parameters</p>
-            <p className="text-[11px] font-medium text-ink-300">Lakshya Skill Finance</p>
+            <p className="text-[11px] font-medium text-ink-300">{brand.displayName}</p>
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-3 text-xs text-ink-200">
@@ -217,87 +143,41 @@ export default function RiskParametersPage() {
         </div>
       </header>
 
+      <Card className="mb-5">
+        <div className="mb-1 flex items-center gap-2">
+          <SlidersHorizontal className="h-4 w-4 text-ink-500 dark:text-ink-400" />
+          <p className="text-sm font-bold text-ink-900 dark:text-white">Risk policy thresholds</p>
+        </div>
+        <p className="mb-3 text-xs text-ink-400">
+          Max loan-to-income multiple, assumed annual interest rate, and max EMI-to-income ratio — per segment
+          (Farmer / Vocational Student / Business Owner) — now live in DLP&rsquo;s Business Rules Engine as the{" "}
+          <code className="rounded bg-ink-100 px-1 py-0.5 text-[11px] dark:bg-ink-800">SkillFinanceRiskGate</code>{" "}
+          decision table, evaluated live on every submission (BR-43&rsquo;s &ldquo;no engineering change&rdquo;
+          seam, now backed by DLP&rsquo;s real BRE instead of this page). Edit them in DLP&rsquo;s Admin Portal —
+          changes there apply to the very next application, no VideoPD deploy needed.
+        </p>
+        <a
+          href={DLP_ADMIN_PORTAL_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="flex items-center justify-between rounded-xl border border-dashed border-ink-200 p-3 text-left transition-colors hover:bg-ink-50 dark:border-ink-700 dark:hover:bg-ink-800"
+        >
+          <div>
+            <p className="text-sm font-semibold text-ink-800 dark:text-ink-100">Open DLP Admin Portal → Decision Tables →</p>
+            <p className="text-xs text-ink-400">SkillFinanceRiskGate</p>
+          </div>
+          <ExternalLink className="h-4 w-4 shrink-0 text-ink-400" />
+        </a>
+      </Card>
+
       <div className="mb-5 flex items-start gap-2 rounded-xl bg-ink-50 p-3 text-xs text-ink-500 dark:bg-ink-800/40 dark:text-ink-400">
         <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
         <p>
-          These feed the automated risk flags every application gets on submission (loan-to-income and EMI-affordability
-          checks), <strong>set independently per segment</strong> since farm/student/business income work differently.
-          What's here now are <strong>generic, industry-standard microfinance underwriting defaults</strong> — not
-          Lakshya's own calibrated risk appetite. Update them per segment once Lakshya provides their real baseline
-          credit questionnaire and risk parameters (BRD Section 12) — no engineering change needed, just this form.
+          Farm income is typically seasonal/harvest-cycle, not a stable monthly figure, and a vocational student
+          applicant often has no current income at all (the loan is against future earning potential or a
+          guarantor) — worth keeping in mind when calibrating these thresholds per segment in the Admin Portal.
         </p>
       </div>
-
-      <div className="mb-5 flex gap-1.5 rounded-xl bg-ink-100 p-1 dark:bg-ink-800">
-        {SEGMENTS.map((s) => (
-          <button
-            key={s.value}
-            onClick={() => setSegment(s.value)}
-            className={cn(
-              "flex-1 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors",
-              segment === s.value ? "bg-white text-ink-900 shadow-soft dark:bg-ink-900 dark:text-white" : "text-ink-500 hover:text-ink-700 dark:text-ink-400"
-            )}
-          >
-            {s.label}
-          </button>
-        ))}
-      </div>
-
-      {SEGMENT_NOTES[segment] && (
-        <div className="mb-5 flex items-start gap-2 rounded-xl bg-sprout-50 p-3 text-xs text-sprout-700 dark:bg-sprout-950/20 dark:text-sprout-400">
-          <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-          <p>{SEGMENT_NOTES[segment]}</p>
-        </div>
-      )}
-
-      {isDefault && (
-        <div className="mb-5 flex items-center gap-1.5 rounded-xl bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700 dark:bg-amber-950/20 dark:text-amber-400">
-          <AlertTriangle className="h-3.5 w-3.5 shrink-0" /> Still using generic defaults for this segment — never calibrated by Lakshya.
-        </div>
-      )}
-
-      {loading || !data ? (
-        <div className="flex justify-center py-12"><Loader2 className="h-6 w-6 animate-spin text-sprout-500" /></div>
-      ) : (
-        <Card>
-          <div className="space-y-5">
-            <Input
-              label="Max loan-to-income multiple"
-              hint="Flags a requested amount above this multiple of stated monthly income (e.g. 36 = ~3 years of income)."
-              type="number"
-              min={1}
-              step={0.5}
-              value={data.maxLoanToIncomeMultiple}
-              onChange={(e) => setData({ ...data, maxLoanToIncomeMultiple: Number(e.target.value) })}
-            />
-            <Input
-              label="Assumed annual interest rate (%)"
-              hint="Used only to estimate a monthly EMI for the affordability check below — not a real quoted rate (none is captured elsewhere in the application data)."
-              type="number"
-              min={0.1}
-              step={0.5}
-              value={data.assumedAnnualInterestRatePct}
-              onChange={(e) => setData({ ...data, assumedAnnualInterestRatePct: Number(e.target.value) })}
-            />
-            <Input
-              label="Max EMI-to-income ratio (%)"
-              hint="FOIR-style affordability cap. Flags if the estimated EMI exceeds this share of stated monthly income."
-              type="number"
-              min={1}
-              max={100}
-              step={1}
-              value={data.maxEmiToIncomeRatioPct}
-              onChange={(e) => setData({ ...data, maxEmiToIncomeRatioPct: Number(e.target.value) })}
-            />
-
-            {error && (
-              <p className="flex items-center gap-1.5 text-xs font-medium text-red-500">
-                <AlertTriangle className="h-3.5 w-3.5 shrink-0" /> {error}
-              </p>
-            )}
-          </div>
-        </Card>
-      )}
 
       {/* Feature settings — global, not segment-scoped, so a separate card
           rather than mixed into the per-segment form above. */}
@@ -444,6 +324,55 @@ export default function RiskParametersPage() {
         )}
       </Card>
 
+      {/* Storefront/signage text recognition — on/off switch only, same
+          pattern as the asset checklist card above. Genuinely different
+          check: reads TEXT off signboards/hoardings (EasyOCR scene-text
+          model), where the asset checklist above only detects that an
+          object (e.g. a signboard) is present in frame. */}
+      <Card className="mt-5">
+        <div className="mb-1 flex items-center gap-2">
+          <ScanText className="h-4 w-4 text-ink-500 dark:text-ink-400" />
+          <p className="text-sm font-bold text-ink-900 dark:text-white">Storefront &amp; signage text recognition</p>
+        </div>
+        <p className="mb-4 text-xs text-ink-400">
+          Scans the business-verification recording for legible text on signboards, hoardings, and neighboring
+          storefronts — surfaced as readings for the underwriter to read against the declared business name and
+          location, not an automatic cross-check. English-only in this build.
+        </p>
+
+        {!featureSettings ? (
+          <div className="flex justify-center py-6"><Loader2 className="h-5 w-5 animate-spin text-sprout-500" /></div>
+        ) : (
+          <>
+            <div className="flex items-center justify-between rounded-xl border border-ink-100 p-3 dark:border-ink-800">
+              <div>
+                <p className="text-sm font-semibold text-ink-800 dark:text-ink-100">Signage OCR</p>
+                <p className="text-xs text-ink-400">Runs automatically when an underwriter clicks &ldquo;Run voice check&rdquo; on a case, alongside the other checks.</p>
+              </div>
+              <button
+                onClick={() => handleFeatureToggle("signageOcrCheckEnabled", !featureSettings.signageOcrCheckEnabled)}
+                disabled={staff.role !== "APPROVER" || featureSaving}
+                className={cn(
+                  "relative h-7 w-12 shrink-0 rounded-full transition-colors disabled:opacity-50",
+                  featureSettings.signageOcrCheckEnabled ? "bg-sprout-500" : "bg-ink-200 dark:bg-ink-700"
+                )}
+                aria-label="Toggle signage OCR"
+              >
+                <span
+                  className={cn(
+                    "absolute top-1 h-5 w-5 rounded-full bg-white shadow transition-transform",
+                    featureSettings.signageOcrCheckEnabled ? "translate-x-6" : "translate-x-1"
+                  )}
+                />
+              </button>
+            </div>
+            {staff.role !== "APPROVER" && (
+              <p className="mt-2 text-xs text-ink-400">Approver only.</p>
+            )}
+          </>
+        )}
+      </Card>
+
       {/* Duplicate-application handling — global, separate card from the
           fraud-detection toggles above since it's a different concern
           entirely (how long a stalled draft still counts as "in
@@ -491,22 +420,26 @@ export default function RiskParametersPage() {
         )}
       </Card>
 
-      {!loading && data && (
-        <div className="mt-5 flex flex-wrap items-center justify-between gap-3 rounded-3xl border border-ink-100 bg-white/80 px-6 py-4 shadow-soft backdrop-blur-sm dark:border-ink-800 dark:bg-ink-900/60">
-          {data.updatedBy ? (
-            <p className="text-xs text-ink-400">Risk parameters last updated by {data.updatedBy} on {new Date(data.updatedAt).toLocaleString()}</p>
-          ) : <span />}
-          <Button
-            onClick={handleSave}
-            disabled={staff.role !== "APPROVER"}
-            loading={saving}
-            icon={saved ? <CheckCircle2 className="h-4 w-4" /> : <Save className="h-4 w-4" />}
-            className="ml-auto"
-          >
-            {staff.role !== "APPROVER" ? "Approver only" : saved ? "Saved" : "Save"}
-          </Button>
-        </div>
-      )}
+      {/* Tenant branding — display name, logo, and colors (DLP/LOS
+          integration Phase 5). A separate page, not a card here, since it
+          also handles a file upload (the logo) — same reasoning as the
+          asset-scorecard pointer above. */}
+      <Card className="mt-5">
+        <button
+          onClick={() => router.push("/staff/tenant-branding")}
+          className="flex w-full items-center justify-between rounded-xl border border-dashed border-ink-200 p-3 text-left transition-colors hover:bg-ink-50 dark:border-ink-700 dark:hover:bg-ink-800"
+        >
+          <div className="flex items-center gap-2">
+            <Palette className="h-4 w-4 shrink-0 text-ink-500 dark:text-ink-400" />
+            <div>
+              <p className="text-sm font-semibold text-ink-800 dark:text-ink-100">Tenant branding →</p>
+              <p className="text-xs text-ink-400">Display name, logo, and colors — shown everywhere the brand appears.</p>
+            </div>
+          </div>
+          <ChevronRight className="h-4 w-4 shrink-0 text-ink-400" />
+        </button>
+      </Card>
+
     </main>
   );
 }

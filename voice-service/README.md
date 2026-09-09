@@ -312,6 +312,11 @@ cd voice-service
 ../.venv-voice/Scripts/python.exe -m pip install resemblyzer --no-deps
 ../.venv-voice/Scripts/python.exe -m pip install librosa soundfile scipy click
 ../.venv-voice/Scripts/python.exe -m pip install -r requirements.txt
+# easyocr (signage_ocr.py), --no-deps — its declared opencv-python-headless
+# dependency collides with opencv-contrib-python above (both provide "cv2");
+# the already-installed cv2 already satisfies everything easyocr needs.
+../.venv-voice/Scripts/python.exe -m pip install python-bidi==0.6.11 Shapely==2.1.2 pyclipper==1.4.0
+../.venv-voice/Scripts/python.exe -m pip install easyocr==1.7.2 --no-deps
 ```
 
 `torchvision` is pinned alongside torch/torchaudio in that first command,

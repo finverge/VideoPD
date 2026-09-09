@@ -1,11 +1,16 @@
 "use client";
 
 /**
- * Mock staff sign-in for the Underwriter Workspace — same spirit as the
- * mocked OTP gateway (src/app/api/auth/otp/route.ts): no real auth backend,
- * just enough to demo the maker-checker flow end to end. A real build swaps
- * this for the DLP LOS staff-portal's Keycloak-backed sign-in (see
- * frontend/staff-portal/src/components/SignIn.tsx for that shape).
+ * Staff sign-in for the Underwriter Workspace — DLP/LOS integration Phase 4:
+ * the roster itself now comes from DLP's real Staff Admin
+ * (underwriting-decisioning's StaffMember table, provisioned via
+ * frontend/staff-portal's StaffAdmin.tsx — manual entry, HRMS sync, or CSV
+ * bulk upload, see GET /api/staff/roster + src/lib/dlpStaff.ts) instead of
+ * a fixed array in this file. Sign-in itself is still a no-password
+ * roster-pick, same as DLP's own staff-portal SignIn.tsx today — real
+ * Keycloak-backed sign-in is LOS-20, not built anywhere on the DLP
+ * platform yet (see dlpStaff.ts's doc comment), deliberately deferred per
+ * the integration plan's Phase 4 decision, not silently dropped.
  */
 
 export type StaffRole = "UNDERWRITER" | "APPROVER";
@@ -16,14 +21,16 @@ export interface StaffMember {
   role: StaffRole;
 }
 
-// Small fixed roster — enough to demo one underwriter recommending and a
-// different approver confirming (real maker-checker requires two different
-// people; the UI enforces that on the approver step, see case detail page).
-export const STAFF_ROSTER: StaffMember[] = [
-  { id: "uw-ananya", name: "Ananya Rao", role: "UNDERWRITER" },
-  { id: "uw-karthik", name: "Karthik Menon", role: "UNDERWRITER" },
-  { id: "ap-vikram", name: "Vikram Iyer", role: "APPROVER" },
-  { id: "ap-fatima", name: "Fatima Sheikh", role: "APPROVER" },
+// Last-known-good roster, used only when DLP's Staff Admin is unreachable
+// (src/lib/dlpStaff.ts's graceful degradation) — keeps local dev usable
+// without DLP running, same "fallback constant, not a second real roster"
+// relationship as dlpBre.ts's FALLBACK_RISK_THRESHOLDS. Not shown as DLP
+// staff to avoid ever looking like it came from the real roster.
+export const FALLBACK_STAFF_ROSTER: StaffMember[] = [
+  { id: "fallback-uw-1", name: "Ananya Rao (offline fallback)", role: "UNDERWRITER" },
+  { id: "fallback-uw-2", name: "Karthik Menon (offline fallback)", role: "UNDERWRITER" },
+  { id: "fallback-ap-1", name: "Vikram Iyer (offline fallback)", role: "APPROVER" },
+  { id: "fallback-ap-2", name: "Fatima Sheikh (offline fallback)", role: "APPROVER" },
 ];
 
 const STORAGE_KEY = "finverge_staff_user";

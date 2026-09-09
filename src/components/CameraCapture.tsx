@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Camera, Circle, RotateCcw, Square, Video, X, Check, AlertTriangle, Loader2 } from "lucide-react";
+import { Camera, Circle, RefreshCw, RotateCcw, Square, Video, X, Check, AlertTriangle, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useFocusTrap } from "@/lib/useFocusTrap";
 import { loadFaceModels, faceapi } from "@/lib/faceModels";
@@ -60,6 +60,82 @@ function fixInfiniteDuration(video: HTMLVideoElement) {
   video.currentTime = Number.MAX_SAFE_INTEGER;
 }
 
+/** How many distinct cameras this device actually has, via
+ * MediaDevices.enumerateDevices() — the real, capability-based way to
+ * decide whether a "flip camera" control makes sense, rather than
+ * guessing from a user-agent string (unreliable — iPadOS identifies as
+ * desktop Safari by default since iOS 13) or screen width (a narrow
+ * desktop browser window isn't a phone). A phone/tablet almost always
+ * reports 2+ videoinput devices (front + back); a laptop/desktop webcam
+ * almost always reports exactly 1 — which is what naturally limits the
+ * flip control to "mobile/tablet gets front-or-back, desktop/laptop only
+ * ever gets its one front-facing camera" without any device-type
+ * branching at all.
+ *
+ * Device labels (and sometimes the full device list) are only reliably
+ * populated *after* a getUserMedia permission grant on that origin, so
+ * callers should enumerate after acquiring the initial stream, not
+ * before. */
+async function countVideoInputDevices(): Promise<number> {
+  if (!navigator.mediaDevices?.enumerateDevices) return 1;
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    return devices.filter((d) => d.kind === "videoinput").length;
+  } catch {
+    return 1; // can't tell — assume one camera, same as never offering the button
+  }
+}
+
+const ACQUIRE_TIMEOUT_MS = 10000; // hard ceiling — see acquireCameraStream's own doc comment
+const BUSY_RETRY_DELAYS_MS = [400, 900]; // two retries: covers real-world camera-driver release lag after a call's leave() stops its tracks
+
+/** Wraps getUserMedia with two defenses neither browsers nor the raw API
+ * give you for free:
+ *
+ * 1. Retry on NotReadableError/TrackStartError ("device already in use").
+ *    Reported live: right after leaving a live call (whose own leave()
+ *    genuinely does call track.stop() on every track), the very next
+ *    getUserMedia() for this guided-flow recording can still transiently
+ *    fail — some camera drivers don't release the physical device the
+ *    instant the JS-level track reports stopped. A borrower who clicks
+ *    Continue right after a call is exactly this race, not just the
+ *    two-tabs-one-machine testing case. Only retries this specific error —
+ *    every other cause (permission denied, no camera at all) is retried
+ *    for nothing and should surface immediately instead.
+ * 2. An overall timeout. Reported live: in the exact two-tabs-one-camera
+ *    scenario, some Chrome builds don't reject with NotReadableError at
+ *    all — the getUserMedia() promise just never settles, leaving the
+ *    loading spinner on screen with no way out except closing the dialog.
+ *    Racing a timeout turns that into the same clear, actionable error
+ *    every other failure already gets. */
+async function acquireCameraStream(constraints: MediaStreamConstraints): Promise<MediaStream> {
+  let lastError: any = null;
+  for (let attempt = 0; attempt <= BUSY_RETRY_DELAYS_MS.length; attempt++) {
+    let timedOut = false;
+    const request = navigator.mediaDevices.getUserMedia(constraints);
+    // If the timeout wins the race below but this original request still
+    // resolves later (the hang eventually clears on its own), stop
+    // whatever it hands back immediately — otherwise that stream leaks:
+    // the camera stays physically held with nothing left holding a
+    // reference to release it, which is worse than the hang this exists
+    // to work around.
+    request.then((stream) => { if (timedOut) stream.getTracks().forEach((t) => t.stop()); }).catch(() => {});
+
+    const timeout = new Promise<never>((_, reject) => {
+      setTimeout(() => { timedOut = true; reject({ name: "TimeoutError" }); }, ACQUIRE_TIMEOUT_MS);
+    });
+    try {
+      return await Promise.race([request, timeout]);
+    } catch (e: any) {
+      lastError = e;
+      const retryable = e?.name === "NotReadableError" || e?.name === "TrackStartError";
+      if (!retryable || attempt === BUSY_RETRY_DELAYS_MS.length) throw e;
+      await new Promise((resolve) => setTimeout(resolve, BUSY_RETRY_DELAYS_MS[attempt]));
+    }
+  }
+  throw lastError; // unreachable — loop always returns or throws above
+}
+
 function pickVideoMimeType(): string {
   // WebM first, not mp4 — reported live: "End" (stop recording) and Retake
   // both worked, but the review player's Play button silently did nothing.
@@ -83,13 +159,24 @@ function pickVideoMimeType(): string {
 export function CameraCapture({
   mode,
   facingMode = "environment",
+  allowFlip = true,
   analyzeLiveness = false,
   onCapture,
   onLivenessResult,
   onClose,
 }: {
   mode: Mode;
+  /** Starting camera — the borrower can still flip it live (see allowFlip)
+   * unless this instance opts out. */
   facingMode?: "user" | "environment";
+  /** Set false to lock this capture to `facingMode` with no flip control at
+   * all, regardless of how many cameras the device has — for captures
+   * that are only meaningful facing one direction, e.g. a selfie or the
+   * liveness check (flipping to the back camera mid-liveness would defeat
+   * the point: there'd be no face left to analyze). Everywhere else
+   * (ID/address proof, business photo/video, bank statement) defaults to
+   * true — the borrower may genuinely want either camera for those. */
+  allowFlip?: boolean;
   /** When true (video mode only), runs real face detection/landmarks on the
    * live feed during recording and reports blink/attention/descriptor
    * signals via onLivenessResult once the borrower confirms the capture. */
@@ -118,6 +205,19 @@ export function CameraCapture({
   const [error, setError] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
   const [modelsReady, setModelsReady] = useState(!analyzeLiveness);
+  // The live camera direction — starts at the caller's `facingMode` but,
+  // unlike that prop, changes when the borrower taps the flip button
+  // (flipCamera below), which is what actually re-runs the acquisition
+  // effect further down (it depends on this, not on the static prop).
+  const [currentFacingMode, setCurrentFacingMode] = useState<"user" | "environment">(facingMode);
+  // Whether this device actually has a second camera to flip to — set
+  // once, right after the first successful getUserMedia grant (see
+  // countVideoInputDevices' own doc comment for why not before). Stays
+  // false on every desktop/laptop with a single webcam, which is what
+  // keeps the flip button off those devices without any user-agent or
+  // screen-size guessing.
+  const [canFlip, setCanFlip] = useState(false);
+  const [flipping, setFlipping] = useState(false);
   const [recording, setRecording] = useState(false);
   const [seconds, setSeconds] = useState(0);
   const [capturedUrl, setCapturedUrl] = useState<string | null>(null);
@@ -148,8 +248,8 @@ export function CameraCapture({
     }
     (async () => {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode },
+        const stream = await acquireCameraStream({
+          video: { facingMode: currentFacingMode },
           audio: mode === "video",
         });
         if (cancelled) {
@@ -162,6 +262,14 @@ export function CameraCapture({
           await videoRef.current.play().catch(() => {});
         }
         setReady(true);
+        setFlipping(false);
+        // First grant only — device count doesn't change mid-session, and
+        // labels are already populated by now regardless of which camera
+        // this particular stream ended up on.
+        if (allowFlip) {
+          const count = await countVideoInputDevices();
+          if (!cancelled) setCanFlip(count >= 2);
+        }
       } catch (e: any) {
         // Was just e?.name === "NotAllowedError" vs. one generic fallback —
         // real cause reported live: opening the live VideoPD call (which
@@ -179,8 +287,24 @@ export function CameraCapture({
       if (analysisIntervalRef.current) clearInterval(analysisIntervalRef.current);
       if (blinkPulseTimeoutRef.current) clearTimeout(blinkPulseTimeoutRef.current);
     };
+    // currentFacingMode, not the static facingMode prop — a flip changes
+    // the former, which re-runs this exact acquisition (old stream torn
+    // down via the cleanup above, new one requested on the other camera).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, facingMode]);
+  }, [mode, currentFacingMode]);
+
+  /** Switches to the other camera — only reachable when canFlip is true
+   * (2+ real cameras) and allowFlip permits it for this capture. Disabled
+   * while recording: MediaRecorder is bound to the stream it started
+   * with, so swapping cameras mid-clip isn't something a single
+   * recording can do cleanly — same reason every ordinary camera app
+   * only lets you pick a lens before you hit record. */
+  function flipCamera() {
+    if (recording || flipping || capturedUrl) return;
+    setFlipping(true);
+    setReady(false);
+    setCurrentFacingMode((m) => (m === "user" ? "environment" : "user"));
+  }
 
   // The live preview <video> below is only mounted while capturedUrl is
   // null — confirming a capture swaps it out for a <video src={capturedUrl}>
@@ -400,6 +524,18 @@ export function CameraCapture({
         >
           <X className="h-4 w-4" />
         </button>
+
+        {canFlip && allowFlip && !error && !capturedUrl && !recording && (
+          <button
+            onClick={flipCamera}
+            disabled={flipping}
+            className="absolute left-3 top-3 z-10 flex items-center gap-1.5 rounded-full bg-black/50 px-3 py-2 text-xs font-semibold text-white hover:bg-black/70 disabled:opacity-60"
+            aria-label={currentFacingMode === "user" ? "Switch to back camera" : "Switch to front camera"}
+          >
+            <RefreshCw className={cn("h-4 w-4", flipping && "animate-spin")} />
+            {currentFacingMode === "user" ? "Back" : "Front"}
+          </button>
+        )}
 
         <div className="relative aspect-[4/3] w-full bg-black">
           {error ? (

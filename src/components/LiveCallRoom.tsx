@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { Mic, MicOff, Video as VideoIcon, VideoOff, PhoneOff, PhoneCall, Loader2, AlertTriangle, Users, WifiOff, Headphones, Eye, EyeOff, Captions, ShieldCheck } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useCallRoom, type CallParticipant } from "@/lib/useCallRoom";
@@ -22,15 +22,24 @@ const SIGNALING_URL = process.env.NEXT_PUBLIC_SIGNALING_URL ?? "ws://localhost:4
  * handling — genuinely real-time only; pass recordForVoiceCheck to opt one
  * instance into Tier 1 voice-biometrics recording (see that prop's own doc
  * comment — audio-only, borrower-side, consent-gated). */
-export function LiveCallRoom({
-  roomId,
-  displayName,
-  analyzeLiveness = false,
-  transcribe = false,
-  lang = "en",
-  recordForVoiceCheck = false,
-  applicationId,
-}: {
+/** Imperative escape hatch for a caller that needs to guarantee the call's
+ * camera/mic are released before doing something else that also needs the
+ * camera — e.g. the borrower's page advancing from "welcome" (call still
+ * open) straight into the next step's own CameraCapture. Unmounting
+ * LiveCallRoom already releases the stream via useCallRoom's own cleanup
+ * effect, but that's implicit: it fires on whatever the next render happens
+ * to do, with no guarantee the caller's own next getUserMedia() call waits
+ * for it. forceLeave() lets the caller await the real leave()
+ * (track.stop() on every track) before doing anything else that needs the
+ * device — see the retry/backoff in CameraCapture's acquireCameraStream for
+ * the other half of this same real race (camera driver release lag even
+ * after track.stop() has been called). */
+export interface LiveCallRoomHandle {
+  isJoined: () => boolean;
+  forceLeave: () => Promise<void>;
+}
+
+interface LiveCallRoomProps {
   roomId: string;
   displayName: string;
   /** Pass true only on the instance being monitored (the borrower's own
@@ -55,7 +64,17 @@ export function LiveCallRoom({
   /** Required when recordForVoiceCheck is true — where to upload the
    * recording to. */
   applicationId?: string;
-}) {
+}
+
+export const LiveCallRoom = forwardRef<LiveCallRoomHandle, LiveCallRoomProps>(function LiveCallRoom({
+  roomId,
+  displayName,
+  analyzeLiveness = false,
+  transcribe = false,
+  lang = "en",
+  recordForVoiceCheck = false,
+  applicationId,
+}, ref) {
   const {
     joined, localStream, participants, error, audioOnly, connectionQuality, transcriptSegments,
     join, leave, toggleMic, toggleCamera, setAudioOnly,
@@ -120,6 +139,11 @@ export function LiveCallRoom({
     }
     leave();
   }
+
+  useImperativeHandle(ref, () => ({
+    isJoined: () => joined,
+    forceLeave: handleLeave,
+  }));
 
   if (!joined) {
     if (recordForVoiceCheck && !recordingConsented) {
@@ -274,7 +298,7 @@ export function LiveCallRoom({
       )}
     </div>
   );
-}
+});
 
 function ControlButton({
   active,

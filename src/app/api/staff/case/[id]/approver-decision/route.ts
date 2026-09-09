@@ -15,6 +15,14 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   if (!staffName || !decision) {
     return NextResponse.json({ error: "staffName and decision are required." }, { status: 400 });
   }
+  // Sending a case back with no explanation leaves the underwriter with
+  // nothing to act on — enforced here too, not just as a disabled button in
+  // the UI, same "two eyes" server-side-enforcement standard as the check
+  // above. Approve/Reject stay optional; a send-back specifically needs a
+  // reason since it's handing rework back to a person, not closing the case.
+  if (decision === "SENT_BACK" && !notes?.trim()) {
+    return NextResponse.json({ error: "Notes are required when sending a case back — the underwriter needs to know what to fix." }, { status: 400 });
+  }
 
   const lead = await db.lead.findUnique({ where: { id } });
   if (!lead) return NextResponse.json({ error: "Not found" }, { status: 404 });

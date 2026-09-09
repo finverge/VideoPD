@@ -17,6 +17,7 @@ import { ChatPanel } from "@/components/ChatPanel";
 import { computeDeviceFingerprint } from "@/lib/deviceFingerprint";
 import { StepFields } from "@/components/StepFields";
 import { UploadDropzone } from "@/components/UploadDropzone";
+import { AadhaarAutoFill, type AadhaarAutoFillFields } from "@/components/AadhaarAutoFill";
 import { BrandHeader } from "@/components/BrandHeader";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { Button } from "@/components/ui/Button";
@@ -33,6 +34,7 @@ import {
 import { t } from "@/lib/i18n";
 import { cn, formatINR } from "@/lib/utils";
 import { useFocusTrap } from "@/lib/useFocusTrap";
+import { useTenantConfig } from "@/lib/TenantConfigProvider";
 import type { EvidenceItem, LangCode, SegmentCode } from "@/types";
 
 const EVIDENCE_CONFIG: { type: EvidenceItem["type"]; titleKey: string; helpKey: string; accept: string; capture?: "user" | "environment" }[] = [
@@ -47,6 +49,7 @@ export default function ApplyPage() {
   const params = useParams<{ id: string }>();
   const search = useSearchParams();
   const router = useRouter();
+  const brand = useTenantConfig();
   const applicationId = params.id;
   const lang = (search.get("lang") as LangCode) || (typeof window !== "undefined" ? (localStorage.getItem("finverge_lang") as LangCode) : null) || "en";
 
@@ -123,6 +126,30 @@ export default function ApplyPage() {
 
   function updateField(key: string, value: unknown) {
     setFields((prev) => ({ ...prev, [key]: value }));
+  }
+
+  // Aadhaar QR auto-fill (see src/components/AadhaarAutoFill.tsx and
+  // src/lib/aadhaarQr.ts) — pre-fills whatever the QR decode found;
+  // `idType` is set here too (not returned by the API, just an obvious
+  // inference from "the borrower just uploaded an Aadhaar") so step 2
+  // doesn't ask a question the answer to which is already known. Every
+  // field this touches stays a normal, editable field afterward — this
+  // only changes what's pre-populated, never what's submitted.
+  function handleAadhaarAutoFill(extracted: AadhaarAutoFillFields) {
+    setFields((prev) => ({
+      ...prev,
+      ...(extracted.fullName ? { fullName: extracted.fullName } : {}),
+      ...(extracted.dob ? { dob: extracted.dob } : {}),
+      ...(extracted.gender ? { gender: extracted.gender } : {}),
+      ...(extracted.currentAddress ? { currentAddress: extracted.currentAddress } : {}),
+      // Only ever present from the OCR fallback path, never the QR path —
+      // see aadhaarQr.ts's own doc comment for why the QR never surfaces
+      // this at all (its "Reference Id" field isn't the real number). The
+      // OCR path reads the number straight off the printed card, the same
+      // thing the borrower would otherwise type in by hand here.
+      ...(extracted.idNumber ? { idNumber: extracted.idNumber } : {}),
+      idType: "aadhaar",
+    }));
   }
   function updateSegmentField(key: string, value: unknown) {
     setSegmentFields((prev) => ({ ...prev, [key]: value }));
@@ -339,6 +366,23 @@ export default function ApplyPage() {
                   {stepLabels[step]}
                 </h2>
 
+                {step === 0 && (
+                  <AadhaarAutoFill
+                    lang={lang}
+                    applicationId={applicationId}
+                    onFilled={handleAadhaarAutoFill}
+                    // Same merge pattern UploadDropzone's own onUploaded
+                    // already uses below (replace any prior row of the same
+                    // type, then add the new one) — by the time the
+                    // borrower reaches the Documents & Photos step,
+                    // ID_PROOF/ADDRESS_PROOF already show as filled with a
+                    // change option, no separate UI needed there at all.
+                    onEvidenceUploaded={(ev) =>
+                      setEvidence((prev) => [...prev.filter((e) => e.type !== ev.type), ev])
+                    }
+                  />
+                )}
+
                 {step < CORE_STEPS.length && (
                   <StepFields
                     fields={currentCoreFields}
@@ -527,7 +571,7 @@ export default function ApplyPage() {
               ref={chatSheetRef}
               role="dialog"
               aria-modal="true"
-              aria-label="Lakshya Assistant"
+              aria-label={`${brand.shortName} Assistant`}
               tabIndex={-1}
               initial={{ y: "100%" }}
               animate={{ y: 0 }}

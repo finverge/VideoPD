@@ -23,14 +23,15 @@ export async function PUT(req: NextRequest) {
     lipSyncCheckEnabled?: boolean;
     applicationExpiryDays?: number;
     assetDetectionCheckEnabled?: boolean;
+    signageOcrCheckEnabled?: boolean;
   };
-  const { staffName, staffRole, deepfakeCheckEnabled, lipSyncCheckEnabled, applicationExpiryDays, assetDetectionCheckEnabled } = body;
+  const { staffName, staffRole, deepfakeCheckEnabled, lipSyncCheckEnabled, applicationExpiryDays, assetDetectionCheckEnabled, signageOcrCheckEnabled } = body;
 
   if (staffRole !== "APPROVER") {
     return NextResponse.json({ error: "Only an Approver can update feature settings." }, { status: 403 });
   }
-  if (typeof deepfakeCheckEnabled !== "boolean" || typeof lipSyncCheckEnabled !== "boolean" || typeof assetDetectionCheckEnabled !== "boolean") {
-    return NextResponse.json({ error: "deepfakeCheckEnabled, lipSyncCheckEnabled, and assetDetectionCheckEnabled are all required booleans." }, { status: 400 });
+  if (typeof deepfakeCheckEnabled !== "boolean" || typeof lipSyncCheckEnabled !== "boolean" || typeof assetDetectionCheckEnabled !== "boolean" || typeof signageOcrCheckEnabled !== "boolean") {
+    return NextResponse.json({ error: "deepfakeCheckEnabled, lipSyncCheckEnabled, assetDetectionCheckEnabled, and signageOcrCheckEnabled are all required booleans." }, { status: 400 });
   }
   if (typeof applicationExpiryDays !== "number" || !Number.isInteger(applicationExpiryDays) || applicationExpiryDays < 1) {
     return NextResponse.json({ error: "applicationExpiryDays must be a whole number of at least 1." }, { status: 400 });
@@ -38,8 +39,8 @@ export async function PUT(req: NextRequest) {
 
   const updated = await db.featureSettings.upsert({
     where: { id: "global" },
-    create: { id: "global", deepfakeCheckEnabled, lipSyncCheckEnabled, applicationExpiryDays, assetDetectionCheckEnabled, updatedBy: staffName ?? null },
-    update: { deepfakeCheckEnabled, lipSyncCheckEnabled, applicationExpiryDays, assetDetectionCheckEnabled, updatedBy: staffName ?? null },
+    create: { id: "global", deepfakeCheckEnabled, lipSyncCheckEnabled, applicationExpiryDays, assetDetectionCheckEnabled, signageOcrCheckEnabled, updatedBy: staffName ?? null },
+    update: { deepfakeCheckEnabled, lipSyncCheckEnabled, applicationExpiryDays, assetDetectionCheckEnabled, signageOcrCheckEnabled, updatedBy: staffName ?? null },
   });
 
   return NextResponse.json({ settings: updated });

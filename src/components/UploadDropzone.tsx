@@ -193,6 +193,11 @@ export function UploadDropzone({
           <CameraCapture
             mode={captureMode}
             facingMode={capture}
+            // A selfie (capture="user") must stay on the front camera —
+            // flipping it would defeat the point of the shot. Every other
+            // slot (ID/address proof, business photo/video) is free to
+            // flip on a device that has a second camera.
+            allowFlip={capture !== "user"}
             onClose={() => setCameraOpen(false)}
             onCapture={(file) => {
               setCameraOpen(false);

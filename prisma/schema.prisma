@@ -154,6 +154,17 @@ model LoanApplication {
   // Segment-specific fields (FSD 4.3.2), stored as JSON for prototype flexibility
   segmentFieldsJson String? // JSON blob: farmer | student | business fields
 
+  // DLP/LOS integration Phase 3 — the Flowable process instance id
+  // returned by starting this segment's `Process_SKILLFIN_{segment}` BPMN
+  // case-lifecycle process (src/lib/dlpWorkflow.ts) at submit time. Null
+  // if the process was never started (DLP's Flowable unreachable at
+  // submit time, or that segment's process isn't deployed yet) — same
+  // graceful-degradation contract as dlpBre.ts: this app's own Lead.status
+  // stays the single source of truth for the borrower/underwriter UI
+  // either way. Purely for Flowable-side visibility/audit trail — nothing
+  // in VideoPD ever reads this field back to make a decision.
+  workflowProcessInstanceId String?
+
   // Real client-side device fingerprint (src/lib/deviceFingerprint.ts —
   // canvas/WebGL rendering signature + navigator/screen signals, hashed),
   // captured at submit time. Feeds the SHARED_DEVICE risk flag when the
@@ -270,6 +281,7 @@ model Lead {
   summary       InitialSummaryDocument?
   videoPdSession VideoPdSession?
   decisions      LeadDecision[]
+  camMemos       CreditAppraisalMemo[]
 }
 
 // Full audit trail of every maker-checker round. The single underwriter*/
@@ -297,6 +309,34 @@ model LeadDecision {
   @@index([leadId])
 }
 
+// Credit Appraisal Memo — matched to DLP/LOS's own real, BRD-specified CAM
+// (services/underwriting-decisioning, Appendix E.3 of BRD v1.23), not an
+// independently-invented shape. Same immutable-snapshot design for the same
+// reason stated in that service's own CreditAppraisalMemo model docstring:
+// a document used to justify and audit a sanction decision must reflect
+// what was actually known at that moment, not silently drift if the
+// underlying case data changes afterward. Generated on explicit request
+// (the case page's "Generate CAM" action) — never recomputed live the way
+// the on-screen case detail is, and never overwritten; every prior
+// generation for a case stays queryable (history is never rewritten, same
+// principle as LeadDecision above never being edited in place).
+//
+// snapshotJson holds the full rendered-field payload as one JSON blob,
+// same precedent as VideoPdSession.dossierJson elsewhere in this schema —
+// a point-in-time snapshot of already-computed upstream data, never
+// queried field-by-field in SQL, so a parallel column-per-field schema
+// here would only be duplication with nothing to gain from it.
+model CreditAppraisalMemo {
+  id          String   @id @default(cuid())
+  leadId      String
+  lead        Lead     @relation(fields: [leadId], references: [id])
+  generatedBy String   // staff name who clicked "Generate CAM" — audit trail, same as LeadDecision.actorName
+  generatedAt DateTime @default(now())
+  snapshotJson String
+
+  @@index([leadId])
+}
+
 // VideoPD 2.0 guided-flow session (BRD Section 5.3/8.6, BR-21..BR-29) — the
 // MVP scope agreed for this build: a sequential guided flow (liveness capture
 // → skill/intent Q&A → business verification capture → bank statement upload)
@@ -313,6 +353,20 @@ model VideoPdSession {
   linkSentAt    DateTime @default(now())
   startedAt     DateTime?
   completedAt   DateTime?
+
+  // DLP/LOS integration Phase 6 — track/resume + stall handling. DLP's
+  // Flowable engine now owns a boundary timer on the "waiting for the
+  // borrower to finish VideoPD" span of the case-lifecycle BPMN process
+  // (src/lib/dlpWorkflow.ts's segment processes); when it fires and finds
+  // this session still NOT_STARTED 24h+ after linkSentAt, it calls POST
+  // /api/dlp-bridge/applications/{id}/videopd-reminder (see that route),
+  // which auto-resends the same link/notification and bumps these two
+  // fields — real audit trail of "the system nudged them, not just the
+  // original send", and lets that same reminder logic rate-limit itself
+  // (don't resend again until 24h since the *last* reminder, not just
+  // since the original link).
+  reminderCount      Int      @default(0)
+  lastReminderSentAt DateTime?
 
   skillIntentScore Int?    // 0-100, rule-based (BR-24, BR-43) — see lib/videoPdQuestions.ts
   dossierJson      String? // compiled Actionable Dossier once complete (BR-44): score, consistency flags, bank-statement eligibility summary
@@ -464,6 +518,22 @@ model VoiceBiometricCheck {
   // check runs (see runVoiceCheck.ts), but always a human-owned field
   // from that point on — the underwriter can add or remove any item,
   // AI-suggested or not, and it stays exactly as they left it.
+  // /signage-ocr-check result — storefront & signage text recognition
+  // (see voice-service/signage_ocr.py's own doc comment for the full
+  // honest scope). Runs ONLY against VIDEOPD_BUSINESS_VERIFICATION, same
+  // reasoning as assetDetectionStatus above. Genuinely different check
+  // from assetDetectionStatus/customAssetDetectionStatus: those detect
+  // OBJECT PRESENCE (a signboard is somewhere in frame); this reads the
+  // actual TEXT printed on it (a scene-text OCR model, EasyOCR — not the
+  // Tesseract.js pipeline already used for ID proofs/bank statements,
+  // deliberately, since photographed signage is a harder OCR problem than
+  // a flat printed document). Gated behind
+  // FeatureSettings.signageOcrCheckEnabled.
+  signageOcrStatus        EvidenceCheckStatus @default(PENDING)
+  signageOcrChecklistJson String? // JSON array: [{ text: string, confidence: number, thumbnail: string | null }], sorted by confidence desc
+  signageOcrModel         String?
+  signageOcrNotes         String?
+
   assetChecklistManualTicksJson String?
   // Weighted total over the AI-detected checklist (COCO), the zero-shot
   // custom-detected checklist, AND the manually-ticked items together —
@@ -703,6 +773,53 @@ model AssetScorecardRevision {
 // RiskParameters above, just a boolean instead of numbers — deliberately a
 // separate model rather than bolted onto RiskParameters, since this isn't
 // an underwriting-policy number and applies app-wide, not per-segment.
+// DLP/LOS integration Phase 5 — de-hardcodes "Lakshya Skill Finance" from
+// literal UI copy, and adds real tenant-level logo/branding (per the
+// follow-up request to mirror the pattern already built for Fraud360's
+// own branding_service — see D:\SourceCode\Fraud360\services\
+// branding_service\app\models.py's Branding model, which this shape
+// deliberately mirrors: display_name/logo_url/primary_color/accent_color/
+// neutral_color/default_theme). Singleton row (one tenant, this being a
+// single-tenant local prototype), same `id @default("global")` pattern as
+// FeatureSettings below — not multi-tenant (Fraud360's own version keys
+// on a real tenant_id since it's a genuine multi-tenant SaaS; VideoPD
+// isn't one yet, see services/tenant-onboarding's still-empty state on
+// the DLP side). Positioned so that if/when real tenant-onboarding lands
+// platform-wide, swapping the source is a data-source change here, not a
+// UI rewrite — every consumer already reads through getTenantConfig()
+// (src/lib/tenantConfig.ts) and useTenantConfig() (src/lib/
+// TenantConfigProvider.tsx), never this row directly.
+//
+// Colors are real, stored, and delivered as CSS custom properties
+// (--brand-primary/--brand-accent/--brand-neutral, injected in
+// src/app/layout.tsx — same `:root{--brand-*}` shape Fraud360's own
+// theme_css() emits) — but deliberately NOT wired into every Tailwind
+// utility class across this app (sprout-500, ink-900, etc. — tailwind.
+// config.ts's whole color system is compiled-in hex literals, not
+// CSS-var-backed, and retrofitting that to a full dynamic multi-shade
+// theme engine is a materially bigger, separate effort — not attempted
+// here). What IS real and working: the brand name and logo swap
+// everywhere they're shown, and the 3 stored colors apply to the
+// specific surfaces designed to read them (BrandHeader's fallback
+// wordmark, the staff header gradient) — a genuine, honestly-scoped
+// start, not a full white-label engine.
+model TenantConfig {
+  id           String   @id @default("global")
+  displayName  String   @default("Lakshya Skill Finance")
+  shortName    String   @default("Lakshya")
+  // Public path under /public (e.g. "/logos/tenant-logo-xyz.png") — null
+  // means "no tenant logo uploaded yet, use the bundled default
+  // /logos/lakshya-logo.png" (see BrandHeader.tsx's own existing
+  // image-exists probe/fallback, unchanged by this model).
+  logoUrl      String?
+  primaryColor String   @default("#1cb27d") // matches tailwind.config.ts's sprout-500
+  accentColor  String   @default("#0f1730") // matches tailwind.config.ts's ink-900
+  neutralColor String   @default("#4a629d") // matches tailwind.config.ts's ink-500
+  defaultTheme String   @default("light")   // "light" | "dark" — ThemeToggle's own initial pick when the visitor has no stored preference
+  updatedBy    String?
+  updatedAt    DateTime @updatedAt
+}
+
 model FeatureSettings {
   id                     String   @id @default("global")
   deepfakeCheckEnabled   Boolean  @default(true)
@@ -715,6 +832,13 @@ model FeatureSettings {
   // it off without an engineering change if it turns out to be more noise
   // than signal for a given lending partner.
   assetDetectionCheckEnabled Boolean @default(true)
+  // Storefront/signage text-recognition check (see VoiceBiometricCheck.
+  // signageOcrStatus and voice-service/signage_ocr.py) — its own toggle,
+  // same reasoning as assetDetectionCheckEnabled above: a real but
+  // genuinely limited capability (English-only OCR, no automatic
+  // cross-check against the declared business name), staff should be
+  // able to turn it off without an engineering change.
+  signageOcrCheckEnabled Boolean @default(true)
   // How many days a DRAFT application still counts as "in progress" for the
   // duplicate-application check on the landing page (api/application/
   // duplicate-check/route.ts) — global, not per-segment, same reasoning as

@@ -7,6 +7,7 @@ import { useSpeech } from "@/lib/speech";
 import { t } from "@/lib/i18n";
 import { fieldPrompt } from "@/lib/dialogManager";
 import { cn } from "@/lib/utils";
+import { useTenantConfig } from "@/lib/TenantConfigProvider";
 import type { LangCode, ChatMessage, SegmentCode } from "@/types";
 
 interface PendingConfirm {
@@ -32,6 +33,7 @@ export function ChatPanel({
   onFieldUpdate: (key: string, value: string | number) => void;
   className?: string;
 }) {
+  const brand = useTenantConfig();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
@@ -218,7 +220,7 @@ export function ChatPanel({
             )}
           </div>
           <div>
-            <p className="text-sm font-bold text-white">Lakshya Assistant</p>
+            <p className="text-sm font-bold text-white">{brand.shortName} Assistant</p>
             <p className="text-[11px] font-medium text-ink-300">
               {activeFieldLabel ? `Asking: ${activeFieldLabel}` : "Ready to help"}
             </p>

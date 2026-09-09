@@ -3,13 +3,23 @@
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { cn } from "@/lib/utils";
+import { useTenantConfig } from "@/lib/TenantConfigProvider";
 
 /**
- * Primary brand = Lakshya Skill Finance (the lending partner borrowers deal with).
- * Finverge is attributed as the underlying technology provider via a small,
- * fixed "Powered by" corner badge — never competing with the primary logo.
- * Both fall back to a text wordmark if the logo image files haven't been
- * dropped into /public/logos yet, so the app never shows a broken-image icon.
+ * Primary brand = the current tenant (the lending partner borrowers deal
+ * with — "Lakshya Skill Finance" is just this app's default seed value,
+ * not a hardcoded identity any more; see TenantConfigProvider/
+ * tenantConfig.ts, DLP/LOS integration Phase 5). Finverge is attributed
+ * as the underlying technology provider via a small, fixed "Powered by"
+ * corner badge — never competing with the primary logo, and never
+ * tenant-configurable itself (it's Finverge's own attribution, not the
+ * tenant's brand).
+ *
+ * Both fall back to a text wordmark if no logo image is available — either
+ * the tenant hasn't uploaded one yet (logoUrl is null; see
+ * /staff/tenant-branding) and the bundled default /logos/lakshya-logo.png
+ * doesn't exist either, or the tenant's own uploaded logo file has gone
+ * missing — so the app never shows a broken-image icon.
  *
  * Existence is checked via a plain `new Image()` probe in an effect, not the
  * rendered <img>'s onError — Next.js auto-preloads these images, and a failed
@@ -46,7 +56,9 @@ export function BrandHeader({ className }: { className?: string }) {
 }
 
 export function LakshyaLogo({ size = "md" }: { size?: "sm" | "md" | "lg" }) {
-  const status = useImageExists("/logos/lakshya-logo.png");
+  const brand = useTenantConfig();
+  const logoSrc = brand.logoUrl ?? "/logos/lakshya-logo.png";
+  const status = useImageExists(logoSrc);
   // Responsive height per breakpoint — scales with the page, never fixed-pixel.
   const heightClass =
     size === "lg"
@@ -59,13 +71,24 @@ export function LakshyaLogo({ size = "md" }: { size?: "sm" | "md" | "lg" }) {
     // Text fallback — same visual weight as the intended logo lockup. Shown
     // immediately while the probe is still loading too, so there's no flash
     // of a broken image; it silently swaps to the real logo once confirmed.
+    // Splits the tenant's display name on its last space so "Lakshya Skill
+    // Finance" keeps rendering as "Lakshya" + accented "Skill Finance" (the
+    // original lockup) for any tenant name that follows the same
+    // "one-word-then-rest" shape; a name with no space just renders whole,
+    // unaccented — better than guessing a split that isn't there.
+    const spaceIdx = brand.displayName.indexOf(" ");
+    const firstWord = spaceIdx === -1 ? brand.displayName : brand.displayName.slice(0, spaceIdx);
+    const rest = spaceIdx === -1 ? null : brand.displayName.slice(spaceIdx + 1);
     return (
       <div className="flex items-center gap-2">
-        <div className={cn("flex items-center justify-center rounded-xl bg-gradient-to-br from-sprout-500 to-ink-800 text-white shadow-soft", heightClass, "aspect-square")}>
-          <span className="text-xs font-black">L</span>
+        <div
+          className={cn("flex items-center justify-center rounded-xl text-white shadow-soft", heightClass, "aspect-square")}
+          style={{ background: `linear-gradient(to bottom right, var(--brand-primary), var(--brand-accent))` }}
+        >
+          <span className="text-xs font-black">{brand.shortName.charAt(0) || "L"}</span>
         </div>
         <span className="text-lg font-extrabold tracking-tight text-ink-900 dark:text-white">
-          Lakshya <span className="text-sprout-600 dark:text-sprout-400">Skill Finance</span>
+          {firstWord}{rest && <span className="text-sprout-600 dark:text-sprout-400"> {rest}</span>}
         </span>
       </div>
     );
@@ -74,8 +97,8 @@ export function LakshyaLogo({ size = "md" }: { size?: "sm" | "md" | "lg" }) {
   return (
     // eslint-disable-next-line @next/next/no-img-element
     <img
-      src="/logos/lakshya-logo.png"
-      alt="Lakshya Skill Finance"
+      src={logoSrc}
+      alt={brand.displayName}
       className={cn(heightClass, "w-auto max-w-[60vw] object-contain")}
     />
   );

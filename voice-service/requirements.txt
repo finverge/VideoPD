@@ -19,6 +19,14 @@ opencv-contrib-python==5.0.0.93
 scikit-image==0.26.0
 gdown==5.2.0  # one-time LipForensics checkpoint download only, not used at runtime — see README's "Setup"
 
+# easyocr (signage_ocr.py) is installed SEPARATELY, --no-deps, same
+# reasoning/pattern as resemblyzer above — NOT listed here as a plain
+# entry, because a plain `pip install -r requirements.txt` would pull its
+# declared opencv-python-headless dependency, which collides with
+# opencv-contrib-python already pinned above (both provide the "cv2"
+# import; installing both corrupts whichever DLL gets overwritten second —
+# hit live on Windows). See README.md "Setup" for the exact command.
+
 # torchvision, pinned to the SAME release as torch/torchaudio (see README's
 # "Setup" torch/torchaudio pin note) — transformers' AutoImageProcessor
 # (used by deepfake.py) requires it. Installing it unpinned pulls the

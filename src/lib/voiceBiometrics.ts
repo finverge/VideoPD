@@ -79,6 +79,28 @@ export interface CustomAssetDetectionResult {
   note: string;
 }
 
+export interface SignageOcrItem {
+  text: string;
+  confidence: number;
+  // Same evidence pattern as AssetDetectionItem.thumbnail — a base64 JPEG
+  // crop of the reading's own region, not just text and a number.
+  thumbnail: string | null;
+  // Keyword-matched ("next to"/"near"/"opposite"/...) guess at whether this
+  // reading names a NEIGHBORING premises rather than the borrower's own —
+  // see voice-service/signage_ocr.py's _is_neighbor_reference doc comment
+  // for exactly how and its real limits. A pattern match, not language
+  // understanding — wrong in both directions is expected on real footage.
+  isNeighborReference: boolean;
+}
+
+export interface SignageOcrResult {
+  framesAnalyzed: number;
+  checklist: SignageOcrItem[];
+  model: string;
+  insufficientFrames: boolean;
+  note: string;
+}
+
 export type VoiceServiceCall<T> =
   | { ok: true; data: T }
   | { ok: false; error: string };
@@ -230,6 +252,41 @@ export async function checkCustomAssetDetection(
         framesAnalyzed: json.frames_analyzed,
         checklist: (json.checklist ?? []).map((item: any) => ({ label: item.label, count: item.count, confidence: item.confidence, thumbnail: item.thumbnail ?? null })),
         model: json.model, insufficientFrames: json.insufficient_frames, noQueries: json.no_queries, note: json.note,
+      },
+    };
+  } catch (e: any) {
+    return { ok: false, error: `Could not reach voice service at ${VOICE_SERVICE_URL} — is it running? (${e?.message ?? e})` };
+  }
+}
+
+// Storefront & signage text recognition — genuinely different from
+// checkAssetDetection/checkCustomAssetDetection above, which detect
+// OBJECT PRESENCE. This reads the actual TEXT printed on signboards/
+// hoardings visible in the business-verification clip (see
+// voice-service/signage_ocr.py's own doc comment for the full scope).
+export async function checkSignageOcr(
+  clipBuffer: Buffer, clipName: string, clipMime: string,
+): Promise<VoiceServiceCall<SignageOcrResult>> {
+  const form = new FormData();
+  form.append("clip", new Blob([new Uint8Array(clipBuffer)], { type: clipMime }), clipName);
+  try {
+    // Same cost profile as /asset-detection-check — a real detection+
+    // recognition pass per sampled frame (6).
+    const res = await fetch(`${VOICE_SERVICE_URL}/signage-ocr-check`, { method: "POST", body: form, signal: AbortSignal.timeout(180_000) });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      return { ok: false, error: `Voice service returned ${res.status}: ${detail.slice(0, 300)}` };
+    }
+    const json = await res.json();
+    return {
+      ok: true,
+      data: {
+        framesAnalyzed: json.frames_analyzed,
+        checklist: (json.checklist ?? []).map((item: any) => ({
+          text: item.text, confidence: item.confidence, thumbnail: item.thumbnail ?? null,
+          isNeighborReference: item.is_neighbor_reference ?? false,
+        })),
+        model: json.model, insufficientFrames: json.insufficient_frames, note: json.note,
       },
     };
   } catch (e: any) {

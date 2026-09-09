@@ -4,10 +4,13 @@ embedding comparison (SpeechBrain ECAPA-TDNN, Resemblyzer fallback), a real
 window-embed-cluster multi-speaker scan (Resemblyzer), a frame-level
 deepfake/face-manipulation classifier (deepfake.py), a Phase 1
 work-premises asset checklist (asset_detection.py, fixed 80-category
-COCO vocabulary), and a segment-specific zero-shot custom asset detector
+COCO vocabulary), a segment-specific zero-shot custom asset detector
 (custom_asset_detection.py, open-vocabulary OWLv2 — genuinely detects the
 segment-specific equipment names the COCO model never could, no
-fine-tuning required), over the recordings VideoPD sessions produce:
+fine-tuning required), and storefront/signage text recognition
+(signage_ocr.py, EasyOCR scene-text OCR — reads what's actually printed
+on signboards/hoardings, genuinely different from the two object
+detectors above), over the recordings VideoPD sessions produce:
 VIDEOPD_LIVENESS (selfie step), VIDEOPD_BUSINESS_VERIFICATION
 (business-verification step), and LIVE_CALL_RECORDING (Tier 1 live-call
 audio). See README.md for what this is/isn't and why it's a separate
@@ -30,6 +33,7 @@ from deepfake import analyze_video as analyze_video_deepfake
 from lipsync_check import analyze_video as analyze_video_lipsync
 from asset_detection import analyze_video as analyze_video_assets
 from custom_asset_detection import analyze_video as analyze_video_custom_assets
+from signage_ocr import analyze_video as analyze_video_signage
 
 app = FastAPI(title="VideoPD Voice Biometrics", version="0.1.0")
 
@@ -105,6 +109,21 @@ class CustomAssetDetectionResponse(BaseModel):
     model: str
     insufficient_frames: bool
     no_queries: bool
+    note: str
+
+
+class SignageOcrItem(BaseModel):
+    text: str
+    confidence: float
+    thumbnail: str | None = None  # base64 JPEG data URI cropped from the reading's own box — same evidence pattern as AssetDetectionItem.thumbnail
+    is_neighbor_reference: bool = False  # keyword-matched ("next to"/"near"/"opposite"/...) — see signage_ocr.py's _is_neighbor_reference doc comment for exactly how and its real limits
+
+
+class SignageOcrResponse(BaseModel):
+    frames_analyzed: int
+    checklist: list[SignageOcrItem]
+    model: str
+    insufficient_frames: bool
     note: str
 
 
@@ -372,6 +391,47 @@ async def custom_asset_detection_check(clip: UploadFile = File(...), queries: st
             model=result["model"],
             insufficient_frames=result["insufficientFrames"],
             no_queries=result["noQueries"],
+            note=note,
+        )
+    finally:
+        if path and os.path.exists(path):
+            os.unlink(path)
+
+
+@app.post("/signage-ocr-check", response_model=SignageOcrResponse)
+async def signage_ocr_check(clip: UploadFile = File(...)):
+    """Storefront & signage text recognition — see signage_ocr.py's own
+    doc comment for exactly what this is and its real limitations. Reads
+    text off shop signboards/hoardings/neighboring storefronts visible in
+    the business-verification clip (EasyOCR scene-text model), genuinely
+    different from /asset-detection-check and /custom-asset-detection-check
+    above, which detect OBJECT PRESENCE, not printed text. English-only in
+    this build; every reading is advisory, for the underwriter to read
+    against the borrower's declared business name/premises — not an
+    automatic cross-check."""
+    path = None
+    try:
+        path = await _save_upload(clip)
+        result = analyze_video_signage(path)
+
+        if result["insufficientFrames"]:
+            note = "Couldn't extract any usable frames from this clip — nothing to analyze."
+        else:
+            note = (
+                "Scene-text OCR (EasyOCR, English only) over the business-verification recording — reads "
+                "whatever legible text appears in frame (signboards, hoardings, neighboring shop/institute "
+                "names). Readings that name a neighboring premises are split out separately using a simple "
+                "keyword match (\"next to\"/\"near\"/\"opposite\"/...), not language understanding — expect "
+                "misses in both directions on real footage. Not cross-checked automatically against the "
+                "declared business name. Advisory only — treat a reading as \"the OCR found this text\", "
+                "not a confirmed fact."
+            )
+
+        return SignageOcrResponse(
+            frames_analyzed=result["framesAnalyzed"],
+            checklist=[SignageOcrItem(**item) for item in result["checklist"]],
+            model=result["model"],
+            insufficient_frames=result["insufficientFrames"],
             note=note,
         )
     finally:

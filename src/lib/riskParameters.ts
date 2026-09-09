@@ -45,6 +45,10 @@ export const DEFAULT_RISK_PARAMETERS = {
   maxEmiToIncomeRatioPct: 50,
 };
 
+/** Superseded by src/lib/dlpBre.ts's getSkillFinanceRiskThresholds — the
+ * live submit path (src/app/api/submit/route.ts) no longer calls this.
+ * Kept only because the RiskParameters Prisma model/table still exists
+ * (no migration to drop it has been run); not wired into any live route. */
 export async function getRiskParameters(segment: SegmentCode) {
   const existing = await db.riskParameters.findUnique({ where: { id: segment } });
   if (existing) return existing;

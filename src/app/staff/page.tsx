@@ -3,11 +3,12 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
-import { Landmark, ShieldCheck, UserCheck } from "lucide-react";
+import { Landmark, Loader2, ShieldCheck, UserCheck, WifiOff } from "lucide-react";
 import { Card } from "@/components/ui/Card";
 import { ThemeToggle } from "@/components/ThemeToggle";
-import { STAFF_ROSTER, getStoredStaff, setStoredStaff, type StaffMember } from "@/lib/staffAuth";
+import { getStoredStaff, setStoredStaff, type StaffMember } from "@/lib/staffAuth";
 import { cn } from "@/lib/utils";
+import { useTenantConfig } from "@/lib/TenantConfigProvider";
 
 /**
  * Mock staff sign-in — pick a name from the roster, no password. Internal
@@ -16,7 +17,15 @@ import { cn } from "@/lib/utils";
  */
 export default function StaffSignInPage() {
   const router = useRouter();
+  const brand = useTenantConfig();
   const [checking, setChecking] = useState(true);
+  // DLP/LOS integration Phase 4 — roster now fetched from DLP's real
+  // Staff Admin (GET /api/staff/roster -> src/lib/dlpStaff.ts) instead of
+  // a hardcoded array. `source` distinguishes DLP's real roster from the
+  // offline fallback so a demo/dev session doesn't mistake one for the
+  // other.
+  const [roster, setRoster] = useState<StaffMember[] | null>(null);
+  const [rosterSource, setRosterSource] = useState<"dlp" | "fallback" | null>(null);
 
   useEffect(() => {
     const existing = getStoredStaff();
@@ -27,6 +36,13 @@ export default function StaffSignInPage() {
     setChecking(false);
   }, [router]);
 
+  useEffect(() => {
+    if (checking) return;
+    fetch("/api/staff/roster")
+      .then((r) => r.json())
+      .then((json) => { setRoster(json.staff); setRosterSource(json.source); });
+  }, [checking]);
+
   function signIn(staff: StaffMember) {
     setStoredStaff(staff);
     router.push("/staff/queue");
@@ -34,8 +50,8 @@ export default function StaffSignInPage() {
 
   if (checking) return null;
 
-  const underwriters = STAFF_ROSTER.filter((s) => s.role === "UNDERWRITER");
-  const approvers = STAFF_ROSTER.filter((s) => s.role === "APPROVER");
+  const underwriters = (roster ?? []).filter((s) => s.role === "UNDERWRITER");
+  const approvers = (roster ?? []).filter((s) => s.role === "APPROVER");
 
   return (
     <main className="mx-auto flex min-h-screen max-w-2xl flex-col items-center justify-center px-5 py-10">
@@ -46,7 +62,7 @@ export default function StaffSignInPage() {
           </div>
           <div>
             <p className="text-lg font-extrabold tracking-tight text-ink-900 dark:text-white">Underwriter Workspace</p>
-            <p className="text-xs font-medium text-ink-400">Lakshya Skill Finance · Internal staff only</p>
+            <p className="text-xs font-medium text-ink-400">{brand.displayName} · Internal staff only</p>
           </div>
         </div>
         <ThemeToggle />
@@ -55,27 +71,42 @@ export default function StaffSignInPage() {
       <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }} className="w-full">
         <Card>
           <p className="mb-1 text-sm font-bold text-ink-900 dark:text-white">Sign in as</p>
-          <p className="mb-5 text-xs text-ink-400">
-            Prototype sign-in — pick your name. A real build swaps this for the LOS staff-portal's Keycloak sign-in.
+          <p className="mb-3 text-xs text-ink-400">
+            Roster from DLP&rsquo;s Staff Admin — pick your name, no password. Real Keycloak-backed sign-in is a
+            later phase (not built anywhere on the platform yet); add or remove staff in DLP&rsquo;s Staff Admin and
+            they show up here on the next load.
           </p>
 
-          <p className="mb-2 flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-ink-400">
-            <UserCheck className="h-3.5 w-3.5" /> Underwriters
-          </p>
-          <div className="mb-5 grid grid-cols-1 gap-2 sm:grid-cols-2">
-            {underwriters.map((s) => (
-              <StaffCard key={s.id} staff={s} onClick={() => signIn(s)} />
-            ))}
-          </div>
+          {rosterSource === "fallback" && (
+            <div className="mb-4 flex items-start gap-2 rounded-xl bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700 dark:bg-amber-950/20 dark:text-amber-400">
+              <WifiOff className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              Couldn&rsquo;t reach DLP&rsquo;s Staff Admin — showing an offline fallback roster instead of the real one.
+            </div>
+          )}
 
-          <p className="mb-2 flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-ink-400">
-            <ShieldCheck className="h-3.5 w-3.5" /> Approvers (checker)
-          </p>
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-            {approvers.map((s) => (
-              <StaffCard key={s.id} staff={s} onClick={() => signIn(s)} />
-            ))}
-          </div>
+          {roster === null ? (
+            <div className="flex justify-center py-8"><Loader2 className="h-5 w-5 animate-spin text-sprout-500" /></div>
+          ) : (
+            <>
+              <p className="mb-2 flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-ink-400">
+                <UserCheck className="h-3.5 w-3.5" /> Underwriters
+              </p>
+              <div className="mb-5 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                {underwriters.map((s) => (
+                  <StaffCard key={s.id} staff={s} onClick={() => signIn(s)} />
+                ))}
+              </div>
+
+              <p className="mb-2 flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-ink-400">
+                <ShieldCheck className="h-3.5 w-3.5" /> Approvers (checker)
+              </p>
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                {approvers.map((s) => (
+                  <StaffCard key={s.id} staff={s} onClick={() => signIn(s)} />
+                ))}
+              </div>
+            </>
+          )}
         </Card>
       </motion.div>
     </main>
