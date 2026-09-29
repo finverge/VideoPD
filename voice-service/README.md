@@ -390,8 +390,22 @@ field — it does not fail silently.
 
 ```bash
 cd voice-service
-../.venv-voice/Scripts/python.exe -m uvicorn main:app --port 8077
+../.venv-voice/Scripts/python.exe run_supervised.py
 ```
+
+Not the bare `uvicorn main:app` command this doc used to show — see "Concurrency & memory discipline" below for why that alone isn't safe to leave running under real traffic, and `run_supervised.py`'s own doc comment for exactly what it does. The direct command still works for a one-off manual check (`python main.py`), just don't leave it as the thing actually serving requests.
+
+## Concurrency & memory discipline (production go-live hardening)
+
+Found operating this service directly, not theoretical — two real problems with running it as a single bare uvicorn process under real traffic:
+
+1. **No real concurrency.** Every route handler is `async def`, but each one used to call its actual inference function synchronously and unawaited. FastAPI only auto-offloads a route to a threadpool for a plain `def` handler — `async def` with a blocking call inside runs that CPU-bound work directly on the event loop, so one request (each takes real seconds to a couple of minutes for the heaviest checks) froze the entire process for every other caller, including `/health`. Two underwriters running a check at the same moment didn't run in parallel — the second was fully blocked, not just slower. **Fixed**: every heavy call now goes through `run_in_threadpool` (`starlette.concurrency`), releasing the event loop to keep dispatching other requests while one runs on a worker thread. Verified live, not assumed: two identical warm requests fired simultaneously completed in ~1.4-1.5s each, against a ~2.0s sequential baseline — genuine overlap, not ~4s (what full serialization would produce).
+
+2. **Unbounded memory.** Each check module lazy-loads its own model(s) into a module-level global the first time it's used and never releases them (deliberate — avoids reloading a model every request) — but a process that's been hit by all 7 endpoint types at least once has SpeechBrain, Resemblyzer, LipForensics, the deepfake classifier, RT-DETR, OWLv2, and EasyOCR all resident simultaneously. Measured directly: a fresh process sits around 60-100MB; one full run of every check type grows it to ~3.3GB, and it never comes back down — there's no reliable per-model unload path against PyTorch's own caching allocator. **Fixed**: `main.py` self-recycles via `server.should_exit` (graceful — finishes in-flight requests first, verified live: requests still in flight when the threshold hit all completed successfully) after `VOICE_SERVICE_MAX_REQUESTS` requests (default 40, override via env var), and `run_supervised.py` watches for the process exiting and restarts it immediately — verified live across multiple recycle cycles, including automatic recovery from a real port-bind failure.
+
+Why a hand-rolled watchdog instead of gunicorn's own `--max-requests` (the standard tool for exactly this problem): gunicorn's worker model needs POSIX `fork()`, so it can't run at all on Windows — and this project's actual dev/demo machine is Windows. A real Linux production deployment can use gunicorn (`gunicorn -k uvicorn.workers.UvicornWorker -w N --max-requests 40 --max-requests-jitter 10 main:app`) or Docker/systemd restart policies instead of `run_supervised.py` — `main.py` always exits(0) cleanly regardless of what's supervising it, so these are alternatives, not something that needs to coexist with the watchdog.
+
+**Sizing, not a guess**: this platform's own infra-sizing work capped real expected volume at ~1000 applications/month — even a busy day is a handful of concurrent voice-checks, not hundreds. One well-behaved (non-blocking, self-recycling) process comfortably covers that. If real traffic ever needs more than one CPU core's worth of throughput, `run_supervised.py`'s own doc comment covers running several on different ports behind a simple reverse proxy — deliberately not built speculatively, since nothing in this codebase's actual traffic pattern needs it yet.
 
 ## Calling it from the Next.js app
 

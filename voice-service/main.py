@@ -16,14 +16,21 @@ VIDEOPD_LIVENESS (selfie step), VIDEOPD_BUSINESS_VERIFICATION
 audio). See README.md for what this is/isn't and why it's a separate
 service.
 
-Run: .venv-voice/Scripts/python.exe -m uvicorn main:app --port 8077
+Run (recommended — self-recycling + auto-restart, see the design comment
+further down and run_supervised.py's own doc comment for why):
+    .venv-voice/Scripts/python.exe run_supervised.py
+Run (direct, no recycling/restart — fine for a one-off manual check, not
+for anything meant to stay up):
+    .venv-voice/Scripts/python.exe main.py
 (from this directory — see README.md for the one-time model-download note)
 """
 import json
-import tempfile
 import os
+import sys
+import tempfile
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
 from audio_extract import extract_wav_samples, duration_seconds
@@ -36,6 +43,98 @@ from custom_asset_detection import analyze_video as analyze_video_custom_assets
 from signage_ocr import analyze_video as analyze_video_signage
 
 app = FastAPI(title="VideoPD Voice Biometrics", version="0.1.0")
+
+# --- Concurrency & memory-discipline design (production go-live hardening) ---
+#
+# Two real, measured problems with running this as a single bare `uvicorn
+# main:app` process, found operating it directly (not theoretical):
+#
+# 1. NO REAL CONCURRENCY. Every handler below is `async def`, but each one
+#    calls its actual inference function (embed_ecapa, analyze_video_*, ...)
+#    synchronously and unawaited. FastAPI only auto-offloads a route to a
+#    threadpool for a plain `def` handler — declaring `async def` and then
+#    blocking inside it runs that CPU-bound work directly on the event
+#    loop, so ONE request (each one takes real seconds to a couple of
+#    minutes for the heaviest checks) freezes the entire process for every
+#    other caller, including /health. Two underwriters clicking "Run voice
+#    check" at the same moment don't run in parallel at all — the second
+#    one is fully blocked, not just slower. Fixed below by wrapping every
+#    heavy call in run_in_threadpool (starlette.concurrency) — releases
+#    the event loop to keep accepting/dispatching other requests while
+#    this one runs on a worker thread. PyTorch's own tensor ops release
+#    the GIL during computation, and ffmpeg calls run as a genuinely
+#    separate OS process, so this recovers real overlap, not just the
+#    appearance of it.
+#
+# 2. UNBOUNDED MEMORY. Each check module lazy-loads its own model(s) into a
+#    module-level global the first time it's used, and never releases
+#    them — deliberate (avoids reloading a model on every single request),
+#    but it means a process that has been hit by all 7 endpoint types at
+#    least once has ALL of SpeechBrain/Resemblyzer/LipForensics/Siglip2/
+#    RT-DETR/OWLv2/EasyOCR resident simultaneously. Measured directly: a
+#    freshly started process sits around 60-100MB; one full run of every
+#    check type grows it to ~3.3GB, and it never comes back down. Under
+#    concurrent production load this compounds — there's no per-model
+#    unload path that's reliable against PyTorch's own caching allocator,
+#    so the standard, proven fix (the same one gunicorn's own
+#    --max-requests flag exists for) is a bounded self-recycle: once this
+#    process has served REQUEST_RECYCLE_THRESHOLD requests, it exits
+#    cleanly after finishing any in-flight work, handing the memory
+#    ceiling back to zero. This only WORKS paired with something that
+#    restarts the process the moment it exits — see run_supervised.py in
+#    this same directory, and its own doc comment for why that script
+#    exists instead of just documenting "use gunicorn" (gunicorn's worker
+#    model needs POSIX fork(), so it can't run at all on this project's
+#    Windows dev/demo machine — the recycle-plus-watchdog split below
+#    works identically on Windows and Linux, and a real Linux production
+#    deployment can still layer gunicorn or Docker/systemd restart
+#    policies UNDER this if preferred; they're redundant, not conflicting,
+#    since this process always exits(0) cleanly either way).
+#
+# Sizing note, not a guess: this platform's own infra-sizing work capped
+# real expected volume at ~1000 applications/month — even a genuinely busy
+# day is a handful of concurrent voice-checks, not hundreds. 40 requests
+# (roughly 5-6 full check-suites, each suite being the 7 endpoint calls one
+# "Run voice check" click fires) recycles often enough to keep the memory
+# ceiling bounded without churning the process (and re-paying model-load
+# time) faster than this traffic level would ever need. Override via
+# VOICE_SERVICE_MAX_REQUESTS if a real deployment's traffic pattern differs.
+REQUEST_RECYCLE_THRESHOLD = int(os.environ.get("VOICE_SERVICE_MAX_REQUESTS", "40"))
+_request_count = 0
+# Set by __main__ below, right after constructing the uvicorn Server this
+# process actually runs under. Deliberately NOT using an OS signal
+# (os.kill(os.getpid(), signal.SIGTERM)) to trigger shutdown: Windows has
+# no real inter-process signal delivery, and while self-directed SIGTERM
+# mostly works there via the CRT's raise(), it's uvicorn-version/platform
+# behavior this project has no way to pin down with confidence on the
+# Windows dev/demo machine this actually needs to run on. server.should_exit
+# is uvicorn's own documented, pure-Python, platform-independent API for
+# exactly this — "finish what's in flight, then stop" — with no signal
+# plumbing involved, so it behaves identically on Windows and Linux. The
+# tradeoff: this process must be started via `python main.py` (see
+# __main__ below), not the bare `uvicorn main:app` CLI, since that's what
+# gives this module a reference to the actual running Server instance.
+_server_ref: "uvicorn.Server | None" = None
+
+
+@app.middleware("http")
+async def _recycle_after_threshold(request: Request, call_next):
+    global _request_count
+    response = await call_next(request)
+    _request_count += 1
+    if _request_count >= REQUEST_RECYCLE_THRESHOLD and _server_ref is not None:
+        print(f"[main] Recycling after {_request_count} requests (threshold {REQUEST_RECYCLE_THRESHOLD}) — signaling a graceful shutdown; the watchdog will restart it.", file=sys.stderr, flush=True)
+        # Setting this flag (uvicorn's own supported mechanism) makes the
+        # server finish sending THIS response, stop accepting new
+        # connections, drain any other in-flight requests, then exit —
+        # not an abrupt kill. The watchdog (run_supervised.py) sees the
+        # process exit and restarts it immediately; a request that happens
+        # to land in that gap gets a real connection-refused, not a hang,
+        # and the calling side (runVoiceCheck.ts) already treats voice-
+        # service unreachability as a normal, recoverable condition — same
+        # posture as this process being down for any other reason.
+        _server_ref.should_exit = True
+    return response
 
 MIN_CLIP_SECONDS = 1.5
 # ECAPA-TDNN default per SpeechBrain's own spkrec-ecapa-voxceleb model card
@@ -150,8 +249,8 @@ async def voice_consistency(clip_a: UploadFile = File(...), clip_b: UploadFile =
         path_a = await _save_upload(clip_a)
         path_b = await _save_upload(clip_b)
 
-        samples_a, sr_a = extract_wav_samples(path_a)
-        samples_b, sr_b = extract_wav_samples(path_b)
+        samples_a, sr_a = await run_in_threadpool(extract_wav_samples, path_a)
+        samples_b, sr_b = await run_in_threadpool(extract_wav_samples, path_b)
         dur_a, dur_b = duration_seconds(samples_a, sr_a), duration_seconds(samples_b, sr_b)
 
         if dur_a < MIN_CLIP_SECONDS or dur_b < MIN_CLIP_SECONDS:
@@ -161,16 +260,16 @@ async def voice_consistency(clip_a: UploadFile = File(...), clip_b: UploadFile =
                        f"got {dur_a:.1f}s and {dur_b:.1f}s).",
             )
 
-        emb_a = embed_ecapa(samples_a, sr_a)
-        emb_b = embed_ecapa(samples_b, sr_b)
+        emb_a = await run_in_threadpool(embed_ecapa, samples_a, sr_a)
+        emb_b = await run_in_threadpool(embed_ecapa, samples_b, sr_b)
         if emb_a is not None and emb_b is not None:
             method = "ecapa-tdnn"
             threshold = ECAPA_SAME_SPEAKER_THRESHOLD
         else:
             method = "resemblyzer-fallback"
             threshold = RESEMBLYZER_SAME_SPEAKER_THRESHOLD
-            emb_a = embed_resemblyzer(samples_a, sr_a)
-            emb_b = embed_resemblyzer(samples_b, sr_b)
+            emb_a = await run_in_threadpool(embed_resemblyzer, samples_a, sr_a)
+            emb_b = await run_in_threadpool(embed_resemblyzer, samples_b, sr_b)
 
         similarity = cosine_similarity(emb_a, emb_b)
         same_speaker = similarity >= threshold
@@ -204,7 +303,7 @@ async def multi_speaker(clip: UploadFile = File(...)):
     path = None
     try:
         path = await _save_upload(clip)
-        samples, sr = extract_wav_samples(path)
+        samples, sr = await run_in_threadpool(extract_wav_samples, path)
         dur = duration_seconds(samples, sr)
         if dur < MIN_CLIP_SECONDS:
             raise HTTPException(
@@ -212,7 +311,7 @@ async def multi_speaker(clip: UploadFile = File(...)):
                 detail=f"Clip too short for a reliable scan (need >= {MIN_CLIP_SECONDS}s; got {dur:.1f}s).",
             )
 
-        result = estimate_speaker_count(samples, sr)
+        result = await run_in_threadpool(estimate_speaker_count, samples, sr)
 
         if result.insufficient_audio:
             note = "Too little non-silent audio in this clip to estimate a speaker count."
@@ -249,7 +348,7 @@ async def deepfake_check(clip: UploadFile = File(...)):
     path = None
     try:
         path = await _save_upload(clip)
-        result = analyze_video_deepfake(path)
+        result = await run_in_threadpool(analyze_video_deepfake, path)
 
         if result["insufficientFrames"]:
             note = "Couldn't extract any usable frames from this clip — nothing to analyze."
@@ -285,7 +384,7 @@ async def lip_sync_check(clip: UploadFile = File(...)):
     path = None
     try:
         path = await _save_upload(clip)
-        result = analyze_video_lipsync(path)
+        result = await run_in_threadpool(analyze_video_lipsync, path)
 
         if result["insufficientFrames"]:
             note = (
@@ -324,7 +423,7 @@ async def asset_detection_check(clip: UploadFile = File(...)):
     path = None
     try:
         path = await _save_upload(clip)
-        result = analyze_video_assets(path)
+        result = await run_in_threadpool(analyze_video_assets, path)
 
         if result["insufficientFrames"]:
             note = "Couldn't extract any usable frames from this clip — nothing to analyze."
@@ -369,7 +468,7 @@ async def custom_asset_detection_check(clip: UploadFile = File(...), queries: st
             raise HTTPException(status_code=422, detail="queries must be a JSON array of strings.")
 
         path = await _save_upload(clip)
-        result = analyze_video_custom_assets(path, parsed_queries)
+        result = await run_in_threadpool(analyze_video_custom_assets, path, parsed_queries)
 
         if result["noQueries"]:
             note = "No queries configured for this segment — nothing to look for."
@@ -412,7 +511,7 @@ async def signage_ocr_check(clip: UploadFile = File(...)):
     path = None
     try:
         path = await _save_upload(clip)
-        result = analyze_video_signage(path)
+        result = await run_in_threadpool(analyze_video_signage, path)
 
         if result["insufficientFrames"]:
             note = "Couldn't extract any usable frames from this clip — nothing to analyze."
@@ -437,3 +536,35 @@ async def signage_ocr_check(clip: UploadFile = File(...)):
     finally:
         if path and os.path.exists(path):
             os.unlink(path)
+
+
+# Run directly (python main.py), not via the `uvicorn main:app` CLI — the
+# CLI constructs its own Server instance internally with no way for this
+# module's own code to reach it, which is exactly the reference
+# _recycle_after_threshold above needs to trigger a graceful shutdown
+# through server.should_exit. VOICE_SERVICE_PORT keeps this consistent
+# with run_supervised.py, which needs to launch several of these on
+# different ports for real multi-core throughput at higher volume (see
+# that script's own doc comment) — a single hardcoded port here would
+# make that impossible.
+if __name__ == "__main__":
+    import uvicorn
+
+    # Passing the live `app` object, NOT the "main:app" string form.
+    # uvicorn.Config resolves a string target via importlib, which would
+    # import this same file a SECOND time as a module named "main" —
+    # distinct from the already-running "__main__" module Python actually
+    # executed. That second import gets its own fresh copy of every
+    # module-level global (_server_ref, _request_count, even `app`
+    # itself), so the server would end up running THAT copy's app while
+    # this block's `_server_ref = server` assignment lands in the wrong
+    # module's namespace entirely — the middleware's own _server_ref would
+    # silently stay None forever, and recycling would never fire, with no
+    # error to reveal it. Passing the object directly serves the exact
+    # `app` this block is already part of, so the assignment below reaches
+    # the same closure the middleware actually runs under.
+    port = int(os.environ.get("VOICE_SERVICE_PORT", "8077"))
+    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="info")
+    server = uvicorn.Server(config)
+    _server_ref = server
+    server.run()
